@@ -94,3 +94,7 @@ bb plugin build
 bb plugin install .
 bb plugin dev      # rebuild + reload on change
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
