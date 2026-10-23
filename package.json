@@ -8,15 +8,17 @@
   },
   "bb": {
     "name": "Plugin Updates",
-    "description": "A BB plugin with an example todo list.",
+    "description": "Surfaces plugin updates, including newer releases outside a plugin's range, and applies them.",
     "branding": {
-      "icon": "ListTodo"
+      "icon": "./icons/update.svg",
+      "experimental_icons": {
+        "update": "./icons/update.svg"
+      }
     },
     "server": "./server.ts",
     "app": "./app.tsx"
   },
   "dependencies": {
-    "@radix-ui/react-checkbox": "^1.3.7",
     "@radix-ui/react-slot": "^1.3.0",
     "semver": "^7.8.5",
     "zod": "^4.6.5"

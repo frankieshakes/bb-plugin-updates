@@ -1,141 +1,96 @@
-# bb-plugin-plugin-updates
+# bb-plugin-updates
 
-A BB plugin that keeps a todo list. It shows every surface a plugin can own:
+A BB plugin (id `plugin-updates`) that surfaces plugin updates in the UI and
+applies them, including newer git releases that fall **outside** a plugin's
+installed semver range or pin, which `bb plugin outdated` never reports.
 
-- `server.ts` — the backend: a todo store in `bb.storage.kv`, RPC methods
-  for the page, a `bb plugin-updates` CLI command, a setting, and a realtime signal
-  that keeps every open page current.
-- `app.tsx` — the frontend: an **Example todos** page in the left sidebar
-  (`app.slots.navPanel`) built from the vendored components.
-- `skills/example-todos/SKILL.md` — a skill that tells agents how to keep the list
-  with `bb plugin-updates`. BB imports it into agent threads automatically.
-- `PLUGIN_OVERVIEW.md` — the store listing text: a longer version of
-  `bb.description` that the plugin detail page shows under it. See
-  [Store listing](#store-listing).
+- **Count bubble** on the Plugin Updates nav rail icon. bb doesn't render
+  `experimental_sidebarAccessory` on the rail yet, so the frontend decorates
+  bb's `[data-nav-rail-item]` entry directly (and registers the accessory for
+  when bb does).
+- **Toast** once per newly found version (setting `toastOnNewUpdate`).
+- **Disabled plugins** keep their updates listed with a "Disabled" tag, but
+  aren't counted, toasted (until re-enabled), or included in Update all.
+- **Plugin Updates page** with these sections:
+  - Compatible updates, with Update all
+  - Newer releases outside the range, each behind a confirmation dialog
+  - Blocked by engine ranges
+  - Couldn't check
+  - Collapsed: Ignored, Up to date, and Pinned
+- **CLI**: `bb plugin-updates list | check | update <id> [--out-of-range] | update --all | ignore <id>`.
 
-Try it: install the plugin, open **Example todos** in the sidebar, then run
-`bb plugin-updates add "Ship it"` in a terminal. The page updates at once.
+## How updates are applied
 
-## UI components
+- **Compatible**: bb's own in-place update job (`experimental_startUpdate`).
+- **Out of range**: bb refuses to reinstall an installed plugin, so this
+  takes four steps:
+  1. Snapshot the plugin's non-secret settings.
+  2. Remove the plugin.
+  3. Install it at the new source.
+  4. Restore the settings.
 
-`components/ui/` is vendored source you own (the shadcn model): edit the
-files freely — they never update out from under you. Add more from the BB
-component registry (the full shadcn set, version-matched to your BB install
-via the pinned ref in `components.json`):
+  If the install fails, the old source is reinstalled. If that fails too,
+  the reinstall command is returned. The new source keeps the install's
+  style: a range becomes `^<newest>`, a commit pin moves to the newest tag's
+  commit, and a tag pin moves to the newest tag. Plugins with secret
+  settings, and this plugin itself, get manual steps instead.
+
+## Settings
+
+| Key | Default | |
+| --- | --- | --- |
+| `checkInterval` | `6h` | `1h`, `6h`, `24h`, or `off` (no load or scheduled checks). Reload after changing. |
+| `toastOnNewUpdate` | `true` | Off: badge only. |
+
+## Code organization
 
 ```
-npx shadcn add @bb/select @bb/table
+server.ts              backend entry: wires settings, schedule, RPC, and CLI
+app.tsx                frontend entry: registers the page, overlay, and rail accessory
+
+src/                   backend + shared logic
+  contract.ts          RPC contract and result types (frontend imports types only)
+  channels.ts          realtime channel names (shared)
+  settings.ts          settings descriptors → check schedule
+  store.ts             bb.storage.kv: last check, ignored, announced versions
+  updates.ts           update service: check, report, ignore, announce, start updates
+  out-of-range.ts      remove → install → restore settings, with rollback
+  cli.ts               `bb plugin-updates` command
+  releases.ts          newer tags beyond a range or pin (pure)
+  report.ts            page sections, badge count, ignore/disabled/toast rules (pure)
+  format.ts            report → CLI text (pure)
+  git.ts               `git ls-remote --tags` (no prompts, 15s timeout)
+  errors.ts            error → message
+
+components/            frontend components
+  UpdatesPage.tsx      the page; composes sections/ and the dialog
+  sections/            compatible, out-of-range, notices, collapsed lists
+  OutOfRangeDialog.tsx confirmation + manual/failed fallbacks
+  UpdatesOverlay.tsx   headless: rail count bubble + toasts
+  RailAccessory.tsx    native rail accessory (unused by bb today)
+  list.tsx             Section, Collapsed, Row
+  ui/                  vendored bb components
+hooks/                 useUpdates (report + realtime), useUpdateJobs (bb jobs),
+                       useRailBubble (nav rail decoration)
+lib/updates.ts         frontend constants and helpers
+
+test/                  vitest: releases, report (pure), server (fake bb host via RPC + CLI)
+skills/plugin-updates/ agent skill for the CLI
+icons/update.svg       nav + branding icon
 ```
 
-Run `npm install` once before `bb plugin build` — the vendored components'
-npm deps bundle into your dist. React, and BB-shimmed packages like the
-radix portal primitives and `sonner` (`import { toast } from "sonner"`
-reaches BB's own toaster), are provided by the BB app at runtime and never
-bundled. Every shimmed package is declared in `devDependencies` at the
-host's version so those imports typecheck; keep them there (never in
-`dependencies`, which would bundle a second copy), and `bb plugin types`
-repins declared packages alongside the SDK; unused packages may be removed. Ship `dist/` (npm tarball or committed for
-git installs) so people installing your plugin never need npm.
+The pure modules (`releases`, `report`, `format`) hold the decisions and have
+their own tests. Everything that touches bb goes through `updates.ts` and is
+tested through RPC and the CLI against a fake plugin host. `git.ts` is the
+only module mocked.
 
-## Manifest
-
-`package.json` is the plugin manifest. Notable fields:
-
-- `bb.server` — backend entry (required).
-- `bb.app` — frontend entry. Delete it, `app.tsx`, `components/`,
-  `hooks/`, and `lib/` for a headless plugin.
-- `bb.skills` — skill roots; omitted here, so BB reads `skills/`. Each
-  directory with a `SKILL.md` is one skill, named after the directory.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — the lowest plugin SDK you need (scaffold:
-  `>=0.6.49`). BB reads this as a floor, not a ceiling: a later
-  SDK in the same major still loads your plugin.
-- `dependencies` — every package your source imports that BB does not provide.
-  `bb plugin build` inlines them into `dist/`, and git installs resolve this
-  list alone, so a build-required package here rather than in
-  `devDependencies` is what keeps your plugin installable. `devDependencies`
-  is for types and tooling only (BB shims React, the portal primitives, and
-  `@get-bb/plugin-sdk` at runtime — never bundle them).
-
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` and `app.js` / `app.css` /
-`app.meta.json`. Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts.
-
-## Store listing
-
-Two texts describe the plugin in the store. `bb.description` in package.json
-is the one-sentence hook on every browse card and the lead paragraph on the
-detail page; keep it under about 140 characters. `PLUGIN_OVERVIEW.md` is the
-same claim at length, shown in an Overview section under that paragraph.
-Rewrite the scaffold's copy for your plugin, and update it whenever
-`bb.description` changes, so the two never disagree.
-
-The submission to the public BB Community marketplace requires the file. Keep
-it under 4000 characters (aim for 700 to 1800) and use headings, paragraphs,
-emphasis, code, blockquotes, lists, thematic breaks, and absolute https links
-only — raw HTML, images, tables, footnotes, and task lists are rejected. Do
-not open with a `#` title or repeat `bb.description` verbatim; the page
-shows both directly above.
-
-## Install
-
-From this directory (`bb plugin new` already ran the install; a fresh clone
-needs it):
+## Develop
 
 ```
 npm install
+npm test           # vitest
+npm run typecheck
+bb plugin build
 bb plugin install .
+bb plugin dev      # rebuild + reload on change
 ```
-
-After editing sources, reload:
-
-```
-bb plugin reload plugin-updates
-```
-
-Or let `bb plugin dev` rebuild and reload on every save.
-
-## Configure
-
-```
-bb plugin config plugin-updates
-bb plugin config plugin-updates set showDone false
-bb plugin reload plugin-updates
-```
-
-## Types & API reference
-
-The plugin API ships as the npm package `@get-bb/plugin-sdk`, pinned to an
-exact version in `devDependencies` (`0.6.49` — the SDK of the BB
-that scaffolded this plugin). After `npm install`, the full surface is on disk
-at:
-
-```
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts      # backend
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk-app.d.ts  # frontend
-```
-
-Your editor and `tsc` resolve `@get-bb/plugin-sdk` there through ordinary node
-resolution — no path mapping. These are readable declarations: open them for an
-exact signature.
-
-The SDK surface grows with every BB release, so the pin has to track the BB you
-actually run:
-
-```
-bb plugin types          # sync this plugin's SDK surface to the running BB
-bb plugin types --check  # CI: fail when it does not match
-```
-
-Ask BB to write plugins for you: the `bb-plugin-authoring` skill documents
-the whole surface with examples.
-
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.
