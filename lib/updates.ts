@@ -1,14 +1,9 @@
 // Shared frontend constants and helpers.
-import type { Report } from "../src/report";
+export type { ReportSnapshot as Snapshot } from "../src/contract";
+export { message as errorText } from "../src/errors";
 
 export const PANEL_PATH = "updates";
 export const PANEL_TITLE = "Plugin Updates";
-
-/** The last check's report; null before the first check. */
-export type Snapshot = { report: Report; checkedAt: number } | null;
-
-export const errorText = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause);
 
 export const relativeTime = (at: number) => {
   const minutes = Math.round((Date.now() - at) / 60_000);

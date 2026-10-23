@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRealtime, useRealtimeConnectionState, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { rpcContract } from "../server";
+import { REPORT_CHANGED } from "../src/channels";
+import type { rpcContract } from "../src/contract";
 import { errorText, type Snapshot } from "@/lib/updates";
 
 /** The last check's report, refetched whenever the server says it changed. */
@@ -14,7 +15,7 @@ export function useUpdates() {
   useEffect(() => {
     refetch();
   }, [refetch]);
-  useRealtime("report-changed", refetch);
+  useRealtime(REPORT_CHANGED, refetch);
   // Signals aren't replayed after a reconnect; reconcile instead.
   const connection = useRealtimeConnectionState();
   const wasConnected = useRef(false);

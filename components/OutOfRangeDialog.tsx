@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { OutOfRangeResult, rpcContract } from "../server";
+import type { OutOfRangeResult, rpcContract } from "../src/contract";
 import type { OutOfRangeItem } from "../src/report";
 import { CopyableCommand } from "@/components/CopyableCommand";
 import { ExternalLink } from "@/components/ExternalLink";

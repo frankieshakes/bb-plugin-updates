@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { UpdateJob, rpcContract } from "../server";
+import type { UpdateJob, rpcContract } from "../src/contract";
 
 const isActive = (job: UpdateJob) => job.state === "queued" || job.state === "running";
 

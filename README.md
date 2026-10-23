@@ -42,16 +42,47 @@ installed semver range or pin, which `bb plugin outdated` never reports.
 | `checkInterval` | `6h` | `1h`, `6h`, `24h`, or `off` (no load or scheduled checks). Reload after changing. |
 | `toastOnNewUpdate` | `true` | Off: badge only. |
 
-## Layout
+## Code organization
 
-- `src/releases.ts`: finds newer tags beyond a range or pin (pure).
-- `src/report.ts`: builds page sections, badge count, ignore rules, and toast de-duplication (pure).
-- `src/git.ts`: `git ls-remote --tags` with no prompts and a 15s timeout.
-- `server.ts`: RPC, CLI, schedule, and the out-of-range apply flow.
-- `app.tsx`: frontend entry; registers the page, overlay, and rail accessory.
-- `components/`: `UpdatesPage`, its `sections/`, `OutOfRangeDialog`, `UpdatesOverlay` (rail bubble + toasts), shared list parts.
-- `hooks/`: `useUpdates` (report + realtime), `useUpdateJobs` (bb job polling), `useRailBubble` (nav rail decoration).
-- `lib/updates.ts`: frontend constants and helpers.
+```
+server.ts              backend entry: wires settings, schedule, RPC, and CLI
+app.tsx                frontend entry: registers the page, overlay, and rail accessory
+
+src/                   backend + shared logic
+  contract.ts          RPC contract and result types (frontend imports types only)
+  channels.ts          realtime channel names (shared)
+  settings.ts          settings descriptors → check schedule
+  store.ts             bb.storage.kv: last check, ignored, announced versions
+  updates.ts           update service: check, report, ignore, announce, start updates
+  out-of-range.ts      remove → install → restore settings, with rollback
+  cli.ts               `bb plugin-updates` command
+  releases.ts          newer tags beyond a range or pin (pure)
+  report.ts            page sections, badge count, ignore/disabled/toast rules (pure)
+  format.ts            report → CLI text (pure)
+  git.ts               `git ls-remote --tags` (no prompts, 15s timeout)
+  errors.ts            error → message
+
+components/            frontend components
+  UpdatesPage.tsx      the page; composes sections/ and the dialog
+  sections/            compatible, out-of-range, notices, collapsed lists
+  OutOfRangeDialog.tsx confirmation + manual/failed fallbacks
+  UpdatesOverlay.tsx   headless: rail count bubble + toasts
+  RailAccessory.tsx    native rail accessory (unused by bb today)
+  list.tsx             Section, Collapsed, Row
+  ui/                  vendored bb components
+hooks/                 useUpdates (report + realtime), useUpdateJobs (bb jobs),
+                       useRailBubble (nav rail decoration)
+lib/updates.ts         frontend constants and helpers
+
+test/                  vitest: releases, report (pure), server (fake bb host via RPC + CLI)
+skills/plugin-updates/ agent skill for the CLI
+icons/update.svg       nav + branding icon
+```
+
+The pure modules (`releases`, `report`, `format`) hold the decisions and have
+their own tests. Everything that touches bb goes through `updates.ts` and is
+tested through RPC and the CLI against a fake plugin host. `git.ts` is the
+only module mocked.
 
 ## Develop
 

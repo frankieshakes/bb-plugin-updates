@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
+import { NEW_UPDATES } from "../src/channels";
 import { useRailBubble } from "@/hooks/useRailBubble";
 import { useUpdates } from "@/hooks/useUpdates";
 import { PANEL_PATH } from "@/lib/updates";
@@ -11,7 +12,7 @@ export function UpdatesOverlay() {
   const navigate = useBbNavigate();
   const open = useCallback(() => navigate.toPluginPanel(PANEL_PATH), [navigate]);
   useRailBubble(snapshot?.report.badgeCount ?? 0);
-  useRealtime("new-updates", (payload) => {
+  useRealtime(NEW_UPDATES, (payload) => {
     const updates = (payload as { updates?: Array<{ id: string }> } | null)?.updates ?? [];
     if (updates.length === 0) return;
     const names = [...new Set(updates.map(({ id }) => id))];
