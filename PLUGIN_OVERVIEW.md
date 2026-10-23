@@ -1,21 +1,22 @@
-Keep a todo list beside the work it belongs to, in the sidebar and in
-your agent threads.
+See every plugin update in one place, including the ones `bb plugin outdated`
+can't see, and apply them in a click.
 
 ## What you get
 
-- An **Example todos** page in the left sidebar that adds, completes, and
-  removes todos.
-- A `bb plugin-updates` command that does the same from a terminal.
-- Live updates, so a change made in one place reaches every open page at once.
+- A small **N updates** pill in the bottom-left corner whenever a plugin has
+  an update, and a toast when a new version appears (can be turned off).
+- A **Plugin Updates** page listing compatible updates (with Update all),
+  newer releases outside a plugin's installed range or pin, releases blocked
+  by engine ranges, and collapsed Up to date, Ignored, and Pinned lists.
+- A `bb plugin-updates` command with the same checks for terminals and agents.
 
 ## How it works
 
-The todos live in this plugin's own storage on the BB server, one list per
-installation. Nothing leaves the machine, and the plugin needs no account, API
-key, or external service.
-
-## For agents
-
-The bundled skill tells an agent to read the list with `bb plugin-updates list`, add
-one todo at a time with `bb plugin-updates add`, and close finished work with
-`bb plugin-updates done`.
+bb's own update check covers updates inside each plugin's semver range. For
+git-installed plugins this plugin also lists the repository's release tags
+with `git ls-remote`, so a `^0.7.0` install hears about `0.9.0`. Moving to such
+a release removes and reinstalls the plugin at the new version, keeping the
+range or pin style it was installed with; settings are restored, and a failed
+install rolls back to the old version. Checks run on load and every 6 hours by
+default. Nothing is sent anywhere except git requests to each plugin's own
+repository.

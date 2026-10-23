@@ -1,198 +1,495 @@
-// bb-plugin-plugin-updates — a BB plugin frontend entry.
+// bb-plugin-plugin-updates — frontend. A pill in the bottom-left corner shows
+// how many plugins have updates and opens the Plugin Updates page, where
+// they're applied. Toasts announce newly found versions.
 //
 // Compiled by `bb plugin build` into dist/app.js + dist/app.css. React and
-// @get-bb/plugin-sdk/app are provided by the BB app at load time (never bundled),
-// so this file must be loaded by BB, not imported directly.
-//
-// The components under components/ui/ are YOURS: vendored source (shadcn
-// model), edit freely. Add more from the BB registry with
-// `npx shadcn add @bb/<name>` (see components.json) — dropdowns, tables,
-// the full shadcn set, version-matched to this BB install. Run
-// `npm install` once before `bb plugin build`.
-import { useCallback, useEffect, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
-import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { rpcContract, Todo } from "./server";
+// @get-bb/plugin-sdk/app are provided by the BB app at load time.
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  definePluginApp,
+  useBbNavigate,
+  useRealtime,
+  useRealtimeConnectionState,
+  useRpc,
+} from "@get-bb/plugin-sdk/app";
+import { toast } from "sonner";
+import type { OutOfRangeResult, UpdateJob, rpcContract } from "./server";
+import type { OutOfRangeItem, Report } from "./src/report";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Icon } from "@/components/ui/icon";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-/** The todo list, kept current by the server's "todos-changed" signal. */
-function useTodos() {
+const PANEL_PATH = "updates";
+
+type Snapshot = { report: Report; checkedAt: number } | null;
+
+const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
+
+/** The last check's report, refetched whenever the server says it changed. */
+function useUpdates() {
   const rpc = useRpc<typeof rpcContract>();
-  const [todos, setTodos] = useState<Todo[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const report = useCallback((cause: unknown) => {
-    setError(cause instanceof Error ? cause.message : String(cause));
-  }, []);
+  const [snapshot, setSnapshot] = useState<Snapshot | undefined>(undefined);
   const refetch = useCallback(() => {
-    rpc.call("todos_list").then((result) => {
-      setTodos(result.todos);
-      setError(null);
-    }, report);
-  }, [rpc, report]);
+    rpc.call("report").then(setSnapshot, (cause) => toast.error(errorText(cause)));
+  }, [rpc]);
   useEffect(() => {
     refetch();
   }, [refetch]);
-  // server.ts publishes after every write — from this page, another window,
-  // or `bb plugin-updates add` run by an agent — so the list never goes stale.
-  useRealtime("todos-changed", refetch);
-  return { rpc, todos, error, report, refetch };
+  useRealtime("report-changed", refetch);
+  // Signals aren't replayed after a reconnect; reconcile instead.
+  const connection = useRealtimeConnectionState();
+  const wasConnected = useRef(false);
+  useEffect(() => {
+    if (connection !== "connected") return;
+    if (wasConnected.current) refetch();
+    wasConnected.current = true;
+  }, [connection, refetch]);
+  return { rpc, snapshot, setSnapshot, refetch };
 }
 
-function TodoRow({
-  todo,
-  onToggle,
-  onRemove,
+// ── Overlay: badge pill + new-update toasts ────────────────────────────────
+
+function UpdatesOverlay() {
+  const { snapshot } = useUpdates();
+  const navigate = useBbNavigate();
+  const open = useCallback(() => navigate.toPluginPanel(PANEL_PATH), [navigate]);
+  useRealtime("new-updates", (payload) => {
+    const updates = (payload as { updates?: Array<{ id: string }> } | null)?.updates ?? [];
+    if (updates.length === 0) return;
+    const names = [...new Set(updates.map(({ id }) => id))];
+    toast(
+      names.length === 1 ? `Update available for ${names[0]}` : `${names.length} plugins have updates`,
+      { action: { label: "View", onClick: open } },
+    );
+  });
+  const count = snapshot?.report.badgeCount ?? 0;
+  if (count === 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={open}
+      className="fixed bottom-3 left-3 z-40 inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-foreground shadow-sm hover:bg-state-hover"
+      aria-label={`${count} plugin${count === 1 ? "" : "s"} with updates. Open Plugin Updates.`}
+    >
+      <Icon name="CircleArrowUp" className="size-3.5" />
+      {count} update{count === 1 ? "" : "s"}
+    </button>
+  );
+}
+
+// ── Page ───────────────────────────────────────────────────────────────────
+
+function Section({
+  title,
+  action,
+  children,
 }: {
-  todo: Todo;
-  onToggle: (done: boolean) => void;
-  onRemove: () => void;
+  title: string;
+  action?: ReactNode;
+  children: ReactNode;
 }) {
   return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-medium">{title}</h2>
+        {action}
+      </div>
+      <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card px-4">
+        {children}
+      </ul>
+    </section>
+  );
+}
+
+function Collapsed({ title, count, children }: { title: string; count: number; children: ReactNode }) {
+  if (count === 0) return null;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer select-none text-sm text-muted-foreground hover:text-foreground">
+        {title} ({count})
+      </summary>
+      <ul className="mt-2 divide-y divide-border overflow-hidden rounded-lg border border-border bg-card px-4">
+        {children}
+      </ul>
+    </details>
+  );
+}
+
+function Row({ id, children, actions }: { id: string; children?: ReactNode; actions?: ReactNode }) {
+  return (
     <li className="flex items-center gap-3 py-2.5 text-sm">
-      <Checkbox
-        checked={todo.done}
-        onCheckedChange={(checked) => onToggle(checked === true)}
-        aria-label={`Mark "${todo.title}" ${todo.done ? "not done" : "done"}`}
-      />
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate",
-          todo.done && "text-muted-foreground line-through",
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">{id}</div>
+        {children === undefined ? null : (
+          <div className="truncate text-xs text-muted-foreground">{children}</div>
         )}
-      >
-        {todo.title}
-      </span>
-      <span className="hidden font-mono text-xs text-muted-foreground sm:inline">
-        {todo.id}
-      </span>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-7 text-muted-foreground hover:text-foreground"
-        aria-label={`Remove "${todo.title}"`}
-        onClick={onRemove}
-      >
-        <Icon name="Trash2" className="size-4" />
-      </Button>
+      </div>
+      {actions === undefined ? null : <div className="flex shrink-0 items-center gap-1">{actions}</div>}
     </li>
   );
 }
 
-/** The dashed box BB's own list pages use for loading and empty states. */
-function EmptyState({ children }: { children: ReactNode }) {
+function ExternalLink({ href, children }: { href: string; children: ReactNode }) {
   return (
-    <div
-      role="status"
-      className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground"
-    >
+    <a href={href} target="_blank" rel="noreferrer" className="text-primary underline-offset-4 hover:underline">
       {children}
+    </a>
+  );
+}
+
+function CopyableCommand({ command }: { command: string }) {
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-border bg-muted p-2">
+      <code className="min-w-0 flex-1 whitespace-pre-wrap break-all text-xs">{command}</code>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-7 shrink-0"
+        aria-label="Copy command"
+        onClick={() => {
+          navigator.clipboard.writeText(command).then(
+            () => toast.success("Copied"),
+            (cause) => toast.error(errorText(cause)),
+          );
+        }}
+      >
+        <Icon name="Copy" className="size-4" />
+      </Button>
     </div>
   );
 }
 
-// Tailwind classes compile against the host theme's live CSS variables —
-// derive colors from the theme tokens, never hardcoded grays. The frame
-// (scrolling page, centered column) matches BB's own nav-panel pages.
-function TodosPage() {
-  const { rpc, todos, error, report, refetch } = useTodos();
-  const [title, setTitle] = useState("");
-  const [pending, setPending] = useState(false);
-  const add = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const next = title.trim();
-    if (next === "" || pending) return;
-    setPending(true);
+const relativeTime = (at: number) => {
+  const minutes = Math.round((Date.now() - at) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h ago` : new Date(at).toLocaleDateString();
+};
+
+/** Out-of-range updates reinstall the plugin, so they're confirmed one by one. */
+function OutOfRangeDialog({
+  item,
+  onClose,
+  onDone,
+}: {
+  item: OutOfRangeItem | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<OutOfRangeResult | null>(null);
+  useEffect(() => {
+    setResult(null);
+    setRunning(false);
+  }, [item]);
+  if (item === null) return null;
+
+  const run = async () => {
+    setRunning(true);
     try {
-      await rpc.call("todos_add", { title: next });
-      setTitle("");
-      refetch();
+      const outcome = await rpc.call("update_out_of_range", { id: item.id });
+      if (outcome.kind === "updated") {
+        toast.success(`Updated ${item.id} to ${outcome.to}`);
+        onDone();
+        onClose();
+        return;
+      }
+      if (outcome.kind === "rolled-back") {
+        toast.error(`Couldn't update ${item.id}; it's back on ${item.from}. ${outcome.error}`);
+        onDone();
+        onClose();
+        return;
+      }
+      setResult(outcome);
+      onDone();
     } catch (cause) {
-      report(cause);
+      toast.error(errorText(cause));
     } finally {
-      setPending(false);
+      setRunning(false);
     }
   };
-  const doneCount = todos?.filter((todo) => todo.done).length ?? 0;
+
+  return (
+    <Dialog open onOpenChange={(open) => (open || running ? undefined : onClose())}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Update {item.id} {item.from} → {item.to}?
+          </DialogTitle>
+          <DialogDescription>
+            {item.to} is outside the range {item.id} was installed with, so bb can't update it in
+            place. This removes the plugin and installs the new release. Settings are restored;
+            its storage and schedules may reset. If the install fails, the old version is
+            reinstalled.
+          </DialogDescription>
+        </DialogHeader>
+        <p className="text-sm">
+          <ExternalLink href={item.compareUrl}>See what changed</ExternalLink>
+        </p>
+        {result?.kind === "manual" ? (
+          <div className="space-y-2 text-sm">
+            <p>
+              {result.reason === "self"
+                ? "This plugin can't remove itself. Run this in a terminal instead:"
+                : `${item.id} has secret settings a reinstall would lose. Run this in a terminal, then re-enter them:`}
+            </p>
+            <CopyableCommand command={result.command} />
+          </div>
+        ) : null}
+        {result?.kind === "failed" ? (
+          <div className="space-y-2 text-sm">
+            <p className="text-destructive">
+              The update and the rollback both failed, so {item.id} isn't installed. {result.error}
+            </p>
+            <p>Reinstall it with:</p>
+            <CopyableCommand command={result.command} />
+          </div>
+        ) : null}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={running}>
+            {result === null ? "Cancel" : "Close"}
+          </Button>
+          {result === null ? (
+            <Button onClick={run} disabled={running}>
+              {running ? "Updating…" : `Update to ${item.to}`}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const isActive = (job: UpdateJob) => job.state === "queued" || job.state === "running";
+
+/** bb's background update jobs: polled while any is active, re-check when one ends. */
+function useUpdateJobs(onSettled: () => void) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [jobs, setJobs] = useState<UpdateJob[]>([]);
+  const poll = useCallback(async () => {
+    const { jobs: next } = await rpc.call("jobs");
+    setJobs((previous) => {
+      for (const job of next) {
+        const before = previous.find((p) => p.id === job.id);
+        if (before === undefined || !isActive(before) || isActive(job)) continue;
+        if (job.state === "completed") {
+          if (job.result.outcome === "rolled-back") {
+            toast.error(`${job.pluginId} update rolled back. ${job.result.detail ?? ""}`);
+          } else toast.success(`Updated ${job.pluginId}`);
+        } else if (job.state === "failed") toast.error(`${job.pluginId}: ${job.error}`);
+        onSettled();
+      }
+      return next;
+    });
+  }, [rpc, onSettled]);
+  // Reconcile on load: jobs outlive the page (not a server restart).
+  useEffect(() => {
+    poll().catch(() => undefined);
+  }, [poll]);
+  const anyActive = jobs.some(isActive);
+  useEffect(() => {
+    if (!anyActive) return;
+    const timer = setInterval(() => poll().catch(() => undefined), 1500);
+    return () => clearInterval(timer);
+  }, [anyActive, poll]);
+  const track = (started: UpdateJob[]) =>
+    setJobs((previous) => [...previous.filter((p) => !started.some((s) => s.id === p.id)), ...started]);
+  const activeFor = (id: string) => jobs.some((job) => job.pluginId === id && isActive(job));
+  return { track, activeFor };
+}
+
+function UpdatesPage() {
+  const { rpc, snapshot, setSnapshot } = useUpdates();
+  const [checking, setChecking] = useState(false);
+  const [confirming, setConfirming] = useState<OutOfRangeItem | null>(null);
+
+  const checkNow = useCallback(async () => {
+    setChecking(true);
+    try {
+      setSnapshot(await rpc.call("check"));
+    } catch (cause) {
+      toast.error(errorText(cause));
+    } finally {
+      setChecking(false);
+    }
+  }, [rpc, setSnapshot]);
+  const jobs = useUpdateJobs(checkNow);
+
+  const call = (promise: Promise<Snapshot>) =>
+    promise.then(setSnapshot, (cause) => toast.error(errorText(cause)));
+  const ignore = (id: string, version: string) => call(rpc.call("ignore", { id, version }));
+  const unignore = (id: string, version: string) => call(rpc.call("unignore", { id, version }));
+  const update = (id: string) =>
+    rpc.call("update", { id }).then(({ job }) => jobs.track([job]), (cause) => toast.error(errorText(cause)));
+  const updateAll = () =>
+    rpc.call("update_all").then(({ jobs: started }) => jobs.track(started), (cause) => toast.error(errorText(cause)));
+
+  const report = snapshot?.report;
+  const failures = new Map(report?.releaseCheckFailures.map((f) => [f.id, f.error]) ?? []);
+  const ignoreButton = (id: string, version: string) => (
+    <Button variant="ghost" size="sm" onClick={() => ignore(id, version)}>
+      Ignore
+    </Button>
+  );
+
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto box-border w-full max-w-3xl px-4 pb-4 pt-3 md:px-5 md:pt-4">
-        <p className="text-sm text-muted-foreground">
-          Agents keep this list with <code>bb plugin-updates</code>; the skill in{" "}
-          <code>skills/example-todos</code> tells them how.
-        </p>
-        <form onSubmit={add} className="mt-4 flex items-center gap-2">
-          <Input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="What needs doing?"
-            aria-label="New todo"
-          />
-          <Button type="submit" disabled={pending || title.trim() === ""}>
-            <Icon name="Plus" className="size-4" />
-            Add
+      <div className="mx-auto box-border w-full max-w-3xl space-y-6 px-4 pb-4 pt-3 md:px-5 md:pt-4">
+        <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+          <span>
+            {snapshot === undefined
+              ? "Loading…"
+              : snapshot === null
+                ? "Not checked yet."
+                : `Last checked ${relativeTime(snapshot.checkedAt)}.`}
+          </span>
+          <Button variant="outline" size="sm" onClick={checkNow} disabled={checking}>
+            <Icon name="RefreshCw" className={cn("size-4", checking && "animate-spin")} />
+            {checking ? "Checking…" : "Check now"}
           </Button>
-        </form>
-        {error === null ? null : (
-          <p role="alert" className="mt-3 text-sm text-destructive">
-            {error}
-          </p>
-        )}
-        <div className="mt-4">
-          {todos === null ? (
-            <EmptyState>Loading todos…</EmptyState>
-          ) : todos.length === 0 ? (
-            <EmptyState>
-              Nothing to do. Add one above, or run{" "}
-              <code>bb plugin-updates add "Ship it"</code>.
-            </EmptyState>
-          ) : (
-            <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card px-4">
-              {todos.map((todo) => (
-                <TodoRow
-                  key={todo.id}
-                  todo={todo}
-                  onToggle={(done) => {
-                    rpc
-                      .call("todos_set_done", { id: todo.id, done })
-                      .then(refetch, report);
-                  }}
-                  onRemove={() => {
-                    rpc
-                      .call("todos_remove", { id: todo.id })
-                      .then(refetch, report);
-                  }}
-                />
-              ))}
-            </ul>
-          )}
         </div>
-        {todos !== null && todos.length > 0 ? (
-          <p className="mt-2 text-xs text-muted-foreground">
-            {doneCount} of {todos.length} done
-          </p>
-        ) : null}
+
+        {report === undefined ? null : (
+          <>
+            {report.badgeCount === 0 ? (
+              <div
+                role="status"
+                className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground"
+              >
+                Every plugin is up to date.
+              </div>
+            ) : null}
+
+            {report.compatible.length === 0 ? null : (
+              <Section
+                title="Compatible updates"
+                action={
+                  report.compatible.length > 1 ? (
+                    <Button size="sm" onClick={updateAll}>
+                      Update all
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {report.compatible.map((item) => (
+                  <Row
+                    key={item.id}
+                    id={item.id}
+                    actions={
+                      <>
+                        {ignoreButton(item.id, item.version)}
+                        <Button size="sm" onClick={() => update(item.id)} disabled={jobs.activeFor(item.id)}>
+                          {jobs.activeFor(item.id) ? "Updating…" : "Update"}
+                        </Button>
+                      </>
+                    }
+                  >
+                    {item.from} → {item.to}
+                  </Row>
+                ))}
+              </Section>
+            )}
+
+            {report.outOfRange.length === 0 ? null : (
+              <Section title="Newer releases outside the installed range">
+                {report.outOfRange.map((item) => (
+                  <Row
+                    key={item.id}
+                    id={item.id}
+                    actions={
+                      <>
+                        {ignoreButton(item.id, item.version)}
+                        <Button size="sm" variant="outline" onClick={() => setConfirming(item)}>
+                          Update…
+                        </Button>
+                      </>
+                    }
+                  >
+                    {item.from} → {item.to} ·{" "}
+                    <ExternalLink href={item.compareUrl}>changes</ExternalLink>
+                  </Row>
+                ))}
+              </Section>
+            )}
+
+            {report.blocked.length === 0 ? null : (
+              <Section title="Blocked by engine ranges">
+                {report.blocked.map((item) => (
+                  <Row key={item.id} id={item.id}>
+                    {item.version}: {item.reasons.join("; ")}
+                  </Row>
+                ))}
+              </Section>
+            )}
+
+            {failures.size === 0 ? null : (
+              <Section title="Couldn't check for newer releases">
+                {[...failures].map(([id, error]) => (
+                  <Row key={id} id={id}>
+                    <span title={error}>{error}</span>
+                  </Row>
+                ))}
+              </Section>
+            )}
+
+            <div className="space-y-3">
+              <Collapsed title="Ignored" count={report.ignored.length}>
+                {report.ignored.map((item) => (
+                  <Row
+                    key={`${item.id}@${item.version}`}
+                    id={item.id}
+                    actions={
+                      <Button variant="ghost" size="sm" onClick={() => unignore(item.id, item.version)}>
+                        Un-ignore
+                      </Button>
+                    }
+                  >
+                    {item.kind === "out-of-range" ? `${item.from} → ${item.to}` : item.to}
+                  </Row>
+                ))}
+              </Collapsed>
+              <Collapsed title="Up to date" count={report.upToDate.length}>
+                {report.upToDate.map((item) => (
+                  <Row key={item.id} id={item.id}>
+                    {item.installed}
+                  </Row>
+                ))}
+              </Collapsed>
+              <Collapsed title="Pinned, built in, or unavailable" count={report.other.length}>
+                {report.other.map((item) => (
+                  <Row key={item.id} id={item.id}>
+                    {item.outcome} · {item.installed}
+                    {item.detail === undefined ? "" : ` · ${item.detail}`}
+                  </Row>
+                ))}
+              </Collapsed>
+            </div>
+          </>
+        )}
       </div>
+      <OutOfRangeDialog item={confirming} onClose={() => setConfirming(null)} onDone={checkNow} />
     </div>
   );
 }
 
-// The default export must be definePluginApp(...); BB interprets it after
-// loading the bundle. navPanel adds a page to the left sidebar; register
-// other UI under app.slots and composer actions, plus-menu rows, banners, or
-// rich-text rules with app.composer.customize(...) (see the bb guide's
-// plugins chapter).
 export default definePluginApp((app) => {
   app.slots.navPanel({
-    id: "example-todos",
-    title: "Example todos",
-    icon: "ListTodo",
-    // Routed at /plugins/plugin-updates/example-todos; the component receives the
-    // remainder as `subPath` for deep links within the page.
-    path: "example-todos",
-    component: TodosPage,
+    id: "plugin-updates",
+    title: "Plugin Updates",
+    icon: "CircleArrowUp",
+    path: PANEL_PATH,
+    component: UpdatesPage,
   });
+  app.slots.experimental_appOverlay({ id: "updates-badge", component: UpdatesOverlay });
 });
