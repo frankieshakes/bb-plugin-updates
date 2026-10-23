@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-plugin-updates",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -9,7 +9,7 @@
   },
   "bb": {
     "name": "Plugin Updates",
-    "description": "Surfaces plugin updates, including newer releases outside a plugin's range, and applies them.",
+    "description": "Shows which plugins have updates, including releases outside their version range, and installs them.",
     "branding": {
       "icon": "./icons/update.svg",
       "experimental_icons": {
