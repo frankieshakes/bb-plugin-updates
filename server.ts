@@ -1,225 +1,125 @@
-// bb-plugin-plugin-updates — a BB plugin backend entry.
-//
-// The default export is a factory that receives the plugin API. BB supplies
-// the tiny defineRpcContract runtime helper; the API type remains type-only.
-//
-// The example is a todo list. One store in bb.storage.kv serves three
-// surfaces: the Example todos page (app.tsx, over RPC), the `bb plugin-updates` CLI
-// command (below), and the skill in skills/example-todos/SKILL.md that tells
-// agents how to use that command. A write from any surface publishes a realtime signal so
-// every open page refetches.
-import { randomUUID } from "node:crypto";
+// bb-plugin-plugin-updates — surfaces plugin updates bb has (compatible
+// candidates) and the ones it can't see (newer releases outside a plugin's
+// range or pin), and applies both.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { listRemoteTags } from "./src/git";
+import { releaseCheckTarget, resolveNewerRelease } from "./src/releases";
+import {
+  buildReport,
+  type CheckEntry,
+  type ReleaseResult,
+  type Report,
+} from "./src/report";
 
-const todoSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  done: z.boolean(),
-  createdAt: z.string(),
-});
-export type Todo = z.infer<typeof todoSchema>;
+const versionRef = z.object({ id: z.string().min(1), version: z.string().min(1) });
+const reportOutput = z.object({ report: z.custom<Report>(), checkedAt: z.number() }).nullable();
 
-// Both schemas run at the wire boundary. Handler input/output are inferred
-// from the shared contract; app.tsx imports only its type.
 export const rpcContract = defineRpcContract({
-  todos_list: {
-    input: z.null(),
-    output: z.object({ todos: z.array(todoSchema) }),
-  },
-  todos_add: {
-    input: z.object({ title: z.string().trim().min(1).max(200) }),
-    output: todoSchema,
-  },
-  todos_set_done: {
-    input: z.object({ id: z.string(), done: z.boolean() }),
-    output: todoSchema,
-  },
-  todos_remove: {
-    input: z.object({ id: z.string() }),
-    output: z.object({ removed: z.boolean() }),
-  },
+  check: { input: z.null(), output: reportOutput },
+  report: { input: z.null(), output: reportOutput },
+  ignore: { input: versionRef, output: reportOutput },
+  unignore: { input: versionRef, output: reportOutput },
 });
 
-/** Realtime channel app.tsx listens on; the payload is the todo count. */
-const TODOS_CHANGED = "todos-changed";
+/** The last check's raw results; the report is rebuilt from it on demand. */
+interface LastCheck {
+  checks: CheckEntry[];
+  releases: Record<string, ReleaseResult>;
+  checkedAt: number;
+}
+
+type VersionsById = Record<string, string[]>;
+
+/** Realtime channel the app toasts from; payload `{ updates: [{ id, version }] }`. */
+const NEW_UPDATES = "new-updates";
+/** Realtime channel every page and the badge refetch on; payload `{ badgeCount }`. */
+const REPORT_CHANGED = "report-changed";
 
 export default async function plugin(bb: BbPluginApi) {
-  bb.log.info("loaded");
+  const { plugins } = bb.sdk;
+  const { kv } = bb.storage;
 
-  // Declarative settings — rendered in BB's settings UI and editable with
-  // `bb plugin config plugin-updates`. Add `secret: true` for values like API keys.
-  // Settings are read once per load: reload the plugin after changing one.
   const settings = bb.settings.define({
-    showDone: {
+    toastOnNewUpdate: {
       type: "boolean",
-      label: "Show completed todos",
+      label: "Toast when a new update is found",
+      description: "Off: only the badge shows new updates.",
       default: true,
     },
   });
-  const { showDone } = await settings.get();
+  const { toastOnNewUpdate } = await settings.get();
 
-  // Namespaced key-value storage in bb.db (JSON values, up to 256KB each).
-  // For bigger or relational data use bb.storage.database().
-  async function readTodos(): Promise<Todo[]> {
-    return (await bb.storage.kv.get<Todo[]>("todos")) ?? [];
-  }
-  async function writeTodos(todos: Todo[]): Promise<void> {
-    await bb.storage.kv.set("todos", todos);
-    // Ephemeral broadcast to every connected client; nothing is persisted.
-    bb.realtime.publish(TODOS_CHANGED, { count: todos.length });
+  async function checkRelease(id: string, version: string): Promise<ReleaseResult> {
+    const source = await plugins.getSource({ pluginId: id });
+    const target = releaseCheckTarget(source);
+    if (target.kind === "skip") return { kind: "none" };
+    try {
+      const lsRemote = await listRemoteTags(target.url);
+      return resolveNewerRelease({ source, installedVersion: version, lsRemote });
+    } catch (error) {
+      return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
-  async function listTodos(): Promise<Todo[]> {
-    const todos = await readTodos();
-    return showDone ? todos : todos.filter((todo) => !todo.done);
+  async function currentReport() {
+    const last = await kv.get<LastCheck>("lastCheck");
+    if (last === null || last === undefined) return null;
+    const report = buildReport({
+      checks: last.checks,
+      releases: last.releases,
+      ignored: (await kv.get<VersionsById>("ignored")) ?? {},
+      seen: (await kv.get<VersionsById>("seen")) ?? {},
+    });
+    return { report, checkedAt: last.checkedAt };
   }
-  async function addTodo(title: string): Promise<Todo> {
-    const todo: Todo = {
-      id: randomUUID().slice(0, 8),
-      title,
-      done: false,
-      createdAt: new Date().toISOString(),
-    };
-    await writeTodos([...(await readTodos()), todo]);
-    return todo;
+
+  async function publishReport() {
+    const current = await currentReport();
+    bb.realtime.publish(REPORT_CHANGED, { badgeCount: current?.report.badgeCount ?? 0 });
+    return current;
   }
-  async function setTodoDone(id: string, done: boolean): Promise<Todo | null> {
-    const todos = await readTodos();
-    const todo = todos.find((candidate) => candidate.id === id);
-    if (todo === undefined) return null;
-    todo.done = done;
-    await writeTodos(todos);
-    return todo;
+
+  /** Marks the report's new versions seen; toasts them unless turned off. */
+  async function announce(report: Report) {
+    if (report.newlySeen.length === 0) return;
+    const seen = (await kv.get<VersionsById>("seen")) ?? {};
+    for (const { id, version } of report.newlySeen) seen[id] = [...(seen[id] ?? []), version];
+    await kv.set("seen", seen);
+    if (toastOnNewUpdate) bb.realtime.publish(NEW_UPDATES, { updates: report.newlySeen });
   }
-  async function removeTodo(id: string): Promise<boolean> {
-    const todos = await readTodos();
-    const remaining = todos.filter((todo) => todo.id !== id);
-    if (remaining.length === todos.length) return false;
-    await writeTodos(remaining);
-    return true;
+
+  async function check() {
+    const [checks, { plugins: installed }] = await Promise.all([
+      plugins.checkUpdates(),
+      plugins.list(),
+    ]);
+    const releases: Record<string, ReleaseResult> = {};
+    await Promise.all(
+      installed
+        .filter((p) => !p.source.startsWith("builtin:"))
+        .map(async (p) => {
+          releases[p.id] = await checkRelease(p.id, p.version);
+        }),
+    );
+    await kv.set("lastCheck", { checks, releases, checkedAt: Date.now() } satisfies LastCheck);
+    const current = await publishReport();
+    if (current !== null) await announce(current.report);
+    return current;
+  }
+
+  async function setIgnored(id: string, version: string, ignore: boolean) {
+    const ignored = (await kv.get<VersionsById>("ignored")) ?? {};
+    const versions = (ignored[id] ?? []).filter((v) => v !== version);
+    ignored[id] = ignore ? [...versions, version] : versions;
+    await kv.set("ignored", ignored);
+    return publishReport();
   }
 
   bb.rpc.register(rpcContract, {
-    todos_list: async () => ({ todos: await listTodos() }),
-    todos_add: ({ title }) => addTodo(title),
-    todos_set_done: async ({ id, done }) => {
-      const todo = await setTodoDone(id, done);
-      if (todo === null) throw new Error(`No todo with id ${id}`);
-      return todo;
-    },
-    todos_remove: async ({ id }) => ({ removed: await removeTodo(id) }),
+    check: () => check(),
+    report: () => currentReport(),
+    ignore: ({ id, version }) => setIgnored(id, version, true),
+    unignore: ({ id, version }) => setIgnored(id, version, false),
   });
-
-  // The `bb plugin-updates` command: what agents (and you) use from a shell. Parsing
-  // argv is plugin-owned; `commands` is metadata BB renders into help and
-  // the generated plugin-commands skill without running plugin code.
-  const usage = [
-    "Usage:",
-    "  bb plugin-updates list [--json]",
-    "  bb plugin-updates add <title> [--json]",
-    "  bb plugin-updates done <todo-id> [--json]",
-    "  bb plugin-updates undo <todo-id> [--json]",
-    "  bb plugin-updates remove <todo-id> [--json]",
-  ].join("\n");
-  function formatTodo(todo: Todo): string {
-    return `[${todo.done ? "x" : " "}] ${todo.id}  ${todo.title}`;
-  }
-  bb.cli.register({
-    name: "plugin-updates",
-    summary: "Manage the Plugin Updates plugin's example todo list",
-    commands: [
-      { name: "list", summary: "List todos", usage: "bb plugin-updates list [--json]" },
-      {
-        name: "add",
-        summary: "Add a todo",
-        usage: "bb plugin-updates add <title> [--json]",
-      },
-      {
-        name: "done",
-        summary: "Mark a todo done",
-        usage: "bb plugin-updates done <todo-id> [--json]",
-      },
-      {
-        name: "undo",
-        summary: "Mark a todo not done",
-        usage: "bb plugin-updates undo <todo-id> [--json]",
-      },
-      {
-        name: "remove",
-        summary: "Remove a todo",
-        usage: "bb plugin-updates remove <todo-id> [--json]",
-      },
-    ],
-    async run(argv) {
-      const json = argv.includes("--json");
-      const [command, ...args] = argv.filter((arg) => arg !== "--json");
-      const reply = (value: unknown, text: string) => ({
-        exitCode: 0,
-        stdout: json ? JSON.stringify(value) : text,
-      });
-      const notFound = (missingId: string) => ({
-        exitCode: 1,
-        stderr: `No todo with id ${missingId}. Run "bb plugin-updates list" to see ids.`,
-      });
-      const todoId = args[0];
-      switch (command) {
-        case undefined:
-        case "help":
-        case "--help":
-          return { exitCode: 0, stdout: usage };
-        case "list": {
-          const todos = await listTodos();
-          return reply(
-            todos,
-            todos.length === 0 ? "No todos." : todos.map(formatTodo).join("\n"),
-          );
-        }
-        case "add": {
-          const title = args.join(" ").trim();
-          if (title === "") break;
-          const todo = await addTodo(title);
-          return reply(todo, `Added ${formatTodo(todo)}`);
-        }
-        case "done":
-        case "undo": {
-          if (todoId === undefined || args.length !== 1) break;
-          const todo = await setTodoDone(todoId, command === "done");
-          if (todo === null) return notFound(todoId);
-          return reply(todo, formatTodo(todo));
-        }
-        case "remove": {
-          if (todoId === undefined || args.length !== 1) break;
-          if (!(await removeTodo(todoId))) return notFound(todoId);
-          return reply({ removed: true, id: todoId }, `Removed ${todoId}`);
-        }
-      }
-      return { exitCode: 1, stderr: usage };
-    },
-  });
-
-  // Cleanup on reload/disable/shutdown; hooks run LIFO. The sanctioned place
-  // to clear timers and close connections.
-  bb.onDispose(() => {
-    bb.log.info("disposed");
-  });
-
-  // Long-lived background work: starts after load, gets an AbortSignal on
-  // reload/disable/shutdown, and restarts with backoff if it crashes. Sleeps
-  // must wake on abort — a plain setTimeout sleeps through the stop window
-  // and the plugin reports "degraded (service did not stop)" on reload.
-  // bb.background.service("worker", {
-  //   async start(signal) {
-  //     while (!signal.aborted) {
-  //       await new Promise((resolve) => {
-  //         const timer = setTimeout(resolve, 60_000);
-  //         signal.addEventListener(
-  //           "abort",
-  //           () => { clearTimeout(timer); resolve(undefined); },
-  //           { once: true },
-  //         );
-  //       });
-  //     }
-  //   },
-  // });
 }
