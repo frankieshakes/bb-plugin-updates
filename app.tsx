@@ -459,7 +459,7 @@ function UpdatesPage() {
                       <>
                         {ignoreButton(item.id, item.version)}
                         <Button size="sm" variant="outline" onClick={() => setConfirming(item)}>
-                          Update…
+                          Update
                         </Button>
                       </>
                     }
