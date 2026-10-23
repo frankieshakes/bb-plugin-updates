@@ -10,7 +10,10 @@
     "name": "Plugin Updates",
     "description": "Surfaces plugin updates, including newer releases outside a plugin's range, and applies them.",
     "branding": {
-      "icon": "CircleArrowUp"
+      "icon": "./icons/update.svg",
+      "experimental_icons": {
+        "update": "./icons/update.svg"
+      }
     },
     "server": "./server.ts",
     "app": "./app.tsx"

@@ -3,8 +3,8 @@ can't see, and apply them in a click.
 
 ## What you get
 
-- A small **N updates** pill in the bottom-left corner whenever a plugin has
-  an update, and a toast when a new version appears (can be turned off).
+- A count on the **Plugin Updates** nav icon whenever a plugin has an
+  update, and a toast when a new version appears (can be turned off).
 - A **Plugin Updates** page listing compatible updates (with Update all),
   newer releases outside a plugin's installed range or pin, releases blocked
   by engine ranges, and collapsed Up to date, Ignored, and Pinned lists.

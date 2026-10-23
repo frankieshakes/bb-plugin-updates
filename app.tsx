@@ -1,6 +1,6 @@
-// bb-plugin-plugin-updates — frontend. A pill in the bottom-left corner shows
-// how many plugins have updates and opens the Plugin Updates page, where
-// they're applied. Toasts announce newly found versions.
+// bb-plugin-plugin-updates — frontend. A count on the Plugin Updates nav rail
+// icon shows how many plugins have updates; the page applies them. Toasts
+// announce newly found versions.
 //
 // Compiled by `bb plugin build` into dist/app.js + dist/app.css. React and
 // @get-bb/plugin-sdk/app are provided by the BB app at load time.
@@ -56,12 +56,65 @@ function useUpdates() {
   return { rpc, snapshot, setSnapshot, refetch };
 }
 
-// ── Overlay: badge pill + new-update toasts ────────────────────────────────
+// ── Nav rail count + new-update toasts ─────────────────────────────────────
 
+const PANEL_TITLE = "Plugin Updates";
+const BUBBLE_ATTR = "data-plugin-updates-count";
+
+/**
+ * bb doesn't render `experimental_sidebarAccessory` on the icon-only nav rail
+ * yet, so decorate our rail entry directly. It's found by bb's
+ * `data-nav-rail-item` wrapper and the button's label; if bb changes that
+ * markup the bubble just doesn't show.
+ */
+function findRailItem(): HTMLElement | null {
+  for (const item of Array.from(document.querySelectorAll<HTMLElement>("[data-nav-rail-item]"))) {
+    const id = item.getAttribute("data-nav-rail-item") ?? "";
+    const label = item.querySelector("button")?.getAttribute("aria-label") ?? "";
+    if (id.includes("plugin-updates") || label.startsWith(PANEL_TITLE)) return item;
+  }
+  return null;
+}
+
+function paintBubble(count: number) {
+  const item = findRailItem();
+  const existing = document.querySelector<HTMLElement>(`[${BUBBLE_ATTR}]`);
+  if (item === null || count === 0) {
+    existing?.remove();
+    return;
+  }
+  const bubble = existing ?? document.createElement("span");
+  if (bubble.parentElement !== item) {
+    if (getComputedStyle(item).position === "static") item.style.position = "relative";
+    bubble.setAttribute(BUBBLE_ATTR, "");
+    bubble.setAttribute("aria-hidden", "true");
+    bubble.className =
+      "pointer-events-none absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground";
+    item.appendChild(bubble);
+  }
+  const text = count > 9 ? "9+" : String(count);
+  if (bubble.textContent !== text) bubble.textContent = text;
+}
+
+/** Keeps the bubble on the rail entry, re-attaching whenever bb re-renders the rail. */
+function useRailBubble(count: number) {
+  useEffect(() => {
+    paintBubble(count);
+    const observer = new MutationObserver(() => paintBubble(count));
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      document.querySelector(`[${BUBBLE_ATTR}]`)?.remove();
+    };
+  }, [count]);
+}
+
+/** Headless: owns the rail bubble and the toasts for every app window. */
 function UpdatesOverlay() {
   const { snapshot } = useUpdates();
   const navigate = useBbNavigate();
   const open = useCallback(() => navigate.toPluginPanel(PANEL_PATH), [navigate]);
+  useRailBubble(snapshot?.report.badgeCount ?? 0);
   useRealtime("new-updates", (payload) => {
     const updates = (payload as { updates?: Array<{ id: string }> } | null)?.updates ?? [];
     if (updates.length === 0) return;
@@ -71,19 +124,14 @@ function UpdatesOverlay() {
       { action: { label: "View", onClick: open } },
     );
   });
+  return null;
+}
+
+/** For bb's native rail accessory slot, once a host surface renders it. */
+function RailAccessory() {
+  const { snapshot } = useUpdates();
   const count = snapshot?.report.badgeCount ?? 0;
-  if (count === 0) return null;
-  return (
-    <button
-      type="button"
-      onClick={open}
-      className="fixed bottom-3 left-3 z-40 inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-foreground shadow-sm hover:bg-state-hover"
-      aria-label={`${count} plugin${count === 1 ? "" : "s"} with updates. Open Plugin Updates.`}
-    >
-      <Icon name="CircleArrowUp" className="size-3.5" />
-      {count} update{count === 1 ? "" : "s"}
-    </button>
-  );
+  return count === 0 ? null : <span className="text-xs tabular-nums">{count}</span>;
 }
 
 // ── Page ───────────────────────────────────────────────────────────────────
@@ -355,7 +403,7 @@ function UpdatesPage() {
                 : `Last checked ${relativeTime(snapshot.checkedAt)}.`}
           </span>
           <Button variant="outline" size="sm" onClick={checkNow} disabled={checking}>
-            <Icon name="RefreshCw" className={cn("size-4", checking && "animate-spin")} />
+            <Icon name="RotateCcw" className={cn("size-4", checking && "animate-spin")} />
             {checking ? "Checking…" : "Check now"}
           </Button>
         </div>
@@ -486,10 +534,11 @@ function UpdatesPage() {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "plugin-updates",
-    title: "Plugin Updates",
-    icon: "CircleArrowUp",
+    title: PANEL_TITLE,
+    icon: "plugin-updates/update",
     path: PANEL_PATH,
     component: UpdatesPage,
+    experimental_sidebarAccessory: RailAccessory,
   });
-  app.slots.experimental_appOverlay({ id: "updates-badge", component: UpdatesOverlay });
+  app.slots.experimental_appOverlay({ id: "rail-count-and-toasts", component: UpdatesOverlay });
 });

@@ -4,7 +4,10 @@ A BB plugin (id `plugin-updates`) that surfaces plugin updates in the UI and
 applies them, including newer git releases that fall **outside** a plugin's
 installed semver range or pin, which `bb plugin outdated` never reports.
 
-- **Pill**: "N updates" in the bottom-left corner when any plugin has one.
+- **Count bubble** on the Plugin Updates nav rail icon. bb doesn't render
+  `experimental_sidebarAccessory` on the rail yet, so the frontend decorates
+  bb's `[data-nav-rail-item]` entry directly (and registers the accessory for
+  when bb does).
 - **Toast** once per newly found version (setting `toastOnNewUpdate`).
 - **Plugin Updates page** with these sections:
   - Compatible updates, with Update all
