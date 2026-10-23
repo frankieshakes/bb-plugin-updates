@@ -46,7 +46,10 @@ installed semver range or pin, which `bb plugin outdated` never reports.
 - `src/report.ts`: builds page sections, badge count, ignore rules, and toast de-duplication (pure).
 - `src/git.ts`: `git ls-remote --tags` with no prompts and a 15s timeout.
 - `server.ts`: RPC, CLI, schedule, and the out-of-range apply flow.
-- `app.tsx`: the pill, toasts, page, and confirmation dialog.
+- `app.tsx`: frontend entry; registers the page, overlay, and rail accessory.
+- `components/`: `UpdatesPage`, its `sections/`, `OutOfRangeDialog`, `UpdatesOverlay` (rail bubble + toasts), shared list parts.
+- `hooks/`: `useUpdates` (report + realtime), `useUpdateJobs` (bb job polling), `useRailBubble` (nav rail decoration).
+- `lib/updates.ts`: frontend constants and helpers.
 
 ## Develop
 

@@ -1,0 +1,42 @@
+import { useCallback, useEffect, useState } from "react";
+import { useRpc } from "@get-bb/plugin-sdk/app";
+import { toast } from "sonner";
+import type { UpdateJob, rpcContract } from "../server";
+
+const isActive = (job: UpdateJob) => job.state === "queued" || job.state === "running";
+
+/** bb's background update jobs: polled while any is active, re-check when one ends. */
+export function useUpdateJobs(onSettled: () => void) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [jobs, setJobs] = useState<UpdateJob[]>([]);
+  const poll = useCallback(async () => {
+    const { jobs: next } = await rpc.call("jobs");
+    setJobs((previous) => {
+      for (const job of next) {
+        const before = previous.find((p) => p.id === job.id);
+        if (before === undefined || !isActive(before) || isActive(job)) continue;
+        if (job.state === "completed") {
+          if (job.result.outcome === "rolled-back") {
+            toast.error(`${job.pluginId} update rolled back. ${job.result.detail ?? ""}`);
+          } else toast.success(`Updated ${job.pluginId}`);
+        } else if (job.state === "failed") toast.error(`${job.pluginId}: ${job.error}`);
+        onSettled();
+      }
+      return next;
+    });
+  }, [rpc, onSettled]);
+  // Reconcile on load: jobs outlive the page (not a server restart).
+  useEffect(() => {
+    poll().catch(() => undefined);
+  }, [poll]);
+  const anyActive = jobs.some(isActive);
+  useEffect(() => {
+    if (!anyActive) return;
+    const timer = setInterval(() => poll().catch(() => undefined), 1500);
+    return () => clearInterval(timer);
+  }, [anyActive, poll]);
+  const track = (started: UpdateJob[]) =>
+    setJobs((previous) => [...previous.filter((p) => !started.some((s) => s.id === p.id)), ...started]);
+  const activeFor = (id: string) => jobs.some((job) => job.pluginId === id && isActive(job));
+  return { track, activeFor };
+}
