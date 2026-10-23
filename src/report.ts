@@ -12,6 +12,8 @@ export type ReleaseResult = NewerRelease | { kind: "failed"; error: string };
 
 export interface CompatibleItem {
   id: string;
+  /** The plugin is turned off: shown, but not counted, announced, or in Update all. */
+  disabled?: true;
   from: string;
   to: string;
   version: string;
@@ -19,6 +21,7 @@ export interface CompatibleItem {
 
 export interface OutOfRangeItem {
   id: string;
+  disabled?: true;
   from: string;
   to: string;
   version: string;
@@ -63,9 +66,13 @@ export function buildReport(input: {
   releases: Record<string, ReleaseResult>;
   ignored: Record<string, string[]>;
   seen: Record<string, string[]>;
+  /** Ids of installed plugins that are turned off. */
+  disabled?: string[];
 }): Report {
   const isIgnored = (id: string, version: string) =>
     (input.ignored[id] ?? []).includes(version);
+  const off = new Set(input.disabled ?? []);
+  const flag = (id: string) => (off.has(id) ? { disabled: true as const } : {});
 
   const compatible: CompatibleItem[] = [];
   const outOfRange: OutOfRangeItem[] = [];
@@ -83,6 +90,7 @@ export function buildReport(input: {
         from: entry.installed.display,
         to: entry.candidate.display,
         version: entry.candidate.version,
+        ...flag(entry.id),
       };
       if (isIgnored(item.id, item.version)) ignored.push({ ...item, kind: "compatible" });
       else compatible.push(item);
@@ -93,7 +101,7 @@ export function buildReport(input: {
     }
     if (release?.kind === "out-of-range") {
       const { kind: _, ...rest } = release;
-      const item = { id: entry.id, ...rest, version: release.to };
+      const item = { id: entry.id, ...rest, version: release.to, ...flag(entry.id) };
       if (isIgnored(item.id, item.version)) ignored.push({ ...item, kind: "out-of-range" });
       else outOfRange.push(item);
     }
@@ -108,7 +116,7 @@ export function buildReport(input: {
       });
     }
   }
-  const actionable = [...compatible, ...outOfRange];
+  const actionable = [...compatible, ...outOfRange].filter(({ id }) => !off.has(id));
   return {
     compatible,
     outOfRange,

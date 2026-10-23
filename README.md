@@ -9,6 +9,8 @@ installed semver range or pin, which `bb plugin outdated` never reports.
   bb's `[data-nav-rail-item]` entry directly (and registers the accessory for
   when bb does).
 - **Toast** once per newly found version (setting `toastOnNewUpdate`).
+- **Disabled plugins** keep their updates listed with a "Disabled" tag, but
+  aren't counted, toasted (until re-enabled), or included in Update all.
 - **Plugin Updates page** with these sections:
   - Compatible updates, with Update all
   - Newer releases outside the range, each behind a confirmation dialog

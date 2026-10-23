@@ -3,7 +3,7 @@ import { Row, Section } from "@/components/list";
 import { IgnoreButton } from "@/components/sections/IgnoreButton";
 import { Button } from "@/components/ui/button";
 
-/** Updates bb applies in place; one job each, or all at once. */
+/** Updates bb applies in place; one job each, or all at once (enabled plugins only). */
 export function CompatibleSection({
   items,
   isUpdating,
@@ -22,7 +22,7 @@ export function CompatibleSection({
     <Section
       title="Compatible updates"
       action={
-        items.length > 1 ? (
+        items.filter((i) => !i.disabled).length > 1 ? (
           <Button size="sm" onClick={onUpdateAll}>
             Update all
           </Button>
@@ -33,6 +33,7 @@ export function CompatibleSection({
         <Row
           key={item.id}
           id={item.id}
+          tag={item.disabled ? "Disabled" : undefined}
           actions={
             <>
               <IgnoreButton onClick={() => onIgnore(item.id, item.version)} />

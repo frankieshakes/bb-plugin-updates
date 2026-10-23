@@ -7,6 +7,7 @@ vi.mock("../src/git", () => ({ listRemoteTags: vi.fn() }));
 
 interface FakePlugin {
   source: string;
+  enabled?: boolean;
   version: string;
   detail?: { range?: string; resolvedTag?: string; tagPrefix?: string; subdirectory?: string };
   check: { outcome: string; candidate?: { version: string; display: string } };
@@ -48,7 +49,12 @@ function fakeRegistry(
         return { id: `job-${pluginId}`, pluginId, displayName: pluginId, state: "queued" };
       },
       list: async () => ({
-        plugins: [...installed].map(([id, p]) => ({ id, source: p.source, version: p.version })),
+        plugins: [...installed].map(([id, p]) => ({
+          id,
+          source: p.source,
+          version: p.version,
+          enabled: p.enabled ?? true,
+        })),
       }),
       checkUpdates: async () =>
         [...installed].map(([id, p]) => ({
@@ -437,6 +443,26 @@ describe("plugin-updates backend", () => {
     await service.done;
   });
 
+  it("flags disabled plugins and leaves them out of the badge and Update all", async () => {
+    const registry = fakeRegistry({
+      homepage: { ...homepage, enabled: false },
+      chat: { ...homepage, check: { ...homepage.check, candidate: { version: "c0ffee1", display: "chat@v0.2" } } },
+    });
+    vi.mocked(listRemoteTags).mockResolvedValue("");
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const { report } = await rpc<{ report: RpcReport & { compatible: Array<{ id: string; disabled?: true }> } }>("report");
+    await rpc("update_all");
+
+    expect(report.compatible).toEqual([
+      expect.objectContaining({ id: "homepage", disabled: true }),
+      expect.not.objectContaining({ disabled: true }),
+    ]);
+    expect(report.badgeCount).toBe(1);
+    expect(registry.startedUpdates).toEqual(["chat"]);
+  });
+
   describe("bb plugin-updates", () => {
     it("check and list show both kinds of update", async () => {
       vi.mocked(listRemoteTags).mockImplementation(async (url) =>
@@ -517,6 +543,17 @@ describe("plugin-updates backend", () => {
       expect(
         harness.inspection.realtimeSignals.filter((signal) => signal.channel === "new-updates"),
       ).toHaveLength(2);
+    });
+ 
+    it("list marks disabled plugins", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const { harness } = await load(fakeRegistry({ homepage: { ...homepage, enabled: false } }));
+      await harness.behavior.runCli(["check"]);
+
+      const listed = await harness.behavior.runCli(["list"]);
+
+      expect(listed.stdout).toContain("  homepage (disabled)  ");
+      expect(listed.stdout).toContain("No plugins with updates.");
     });
   });
 });

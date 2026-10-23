@@ -102,11 +102,14 @@ export default async function plugin(bb: BbPluginApi) {
   async function currentReport() {
     const last = await kv.get<LastCheck>("lastCheck");
     if (last === null || last === undefined) return null;
+    // Read live, so turning a plugin on or off shows without a re-check.
+    const { plugins: installed } = await plugins.list();
     const report = buildReport({
       checks: last.checks,
       releases: last.releases,
       ignored: (await kv.get<VersionsById>("ignored")) ?? {},
       seen: (await kv.get<VersionsById>("seen")) ?? {},
+      disabled: installed.filter((p) => p.enabled === false).map((p) => p.id),
     });
     return { report, checkedAt: last.checkedAt };
   }
@@ -153,10 +156,13 @@ export default async function plugin(bb: BbPluginApi) {
     return publishReport();
   }
 
-  /** Out-of-range updates are never included: each needs its own confirmation. */
+  /**
+   * Out-of-range updates are never included (each needs its own confirmation),
+   * nor are disabled plugins.
+   */
   async function updateAllCompatible() {
     const current = await currentReport();
-    const ids = current?.report.compatible.map(({ id }) => id) ?? [];
+    const ids = current?.report.compatible.filter((i) => !i.disabled).map(({ id }) => id) ?? [];
     const jobs = [];
     for (const pluginId of ids) jobs.push(await plugins.experimental_startUpdate({ pluginId }));
     return { jobs };

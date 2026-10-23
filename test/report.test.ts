@@ -193,4 +193,19 @@ describe("buildReport", () => {
     expect(report.upToDate.map(({ id }) => id)).toEqual(["agent-board"]);
     expect(report.badgeCount).toBe(0);
   });
+
+  it("flags a disabled plugin's updates without counting or announcing them", () => {
+    const report = buildReport({
+      checks: [homepageUpdate, agentBoardCurrent],
+      releases: { "agent-board": agentBoardRelease },
+      ignored: {},
+      seen: {},
+      disabled: ["homepage", "agent-board"],
+    });
+
+    expect(report.compatible).toMatchObject([{ id: "homepage", disabled: true }]);
+    expect(report.outOfRange).toMatchObject([{ id: "agent-board", disabled: true }]);
+    expect(report.badgeCount).toBe(0);
+    expect(report.newlySeen).toEqual([]);
+  });
 });

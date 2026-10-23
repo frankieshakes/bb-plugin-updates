@@ -21,6 +21,7 @@ export function OutOfRangeSection({
         <Row
           key={item.id}
           id={item.id}
+          tag={item.disabled ? "Disabled" : undefined}
           actions={
             <>
               <IgnoreButton onClick={() => onIgnore(item.id, item.version)} />

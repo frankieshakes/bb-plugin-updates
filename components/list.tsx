@@ -37,11 +37,29 @@ export function Collapsed({ title, count, children }: { title: string; count: nu
   );
 }
 
-export function Row({ id, children, actions }: { id: string; children?: ReactNode; actions?: ReactNode }) {
+export function Row({
+  id,
+  tag,
+  children,
+  actions,
+}: {
+  id: string;
+  /** A short status shown beside the id, e.g. "Disabled". */
+  tag?: string;
+  children?: ReactNode;
+  actions?: ReactNode;
+}) {
   return (
     <li className="flex items-center gap-3 py-2.5 text-sm">
       <div className="min-w-0 flex-1">
-        <div className="font-medium">{id}</div>
+        <div className="flex items-center gap-2 font-medium">
+          {id}
+          {tag === undefined ? null : (
+            <span className="rounded border border-border px-1.5 py-px text-[11px] font-normal text-muted-foreground">
+              {tag}
+            </span>
+          )}
+        </div>
         {children === undefined ? null : (
           <div className="truncate text-xs text-muted-foreground">{children}</div>
         )}

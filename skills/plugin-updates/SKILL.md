@@ -22,6 +22,9 @@ range. `bb plugin-updates` also finds newer git releases beyond the range
 
 ## Rules
 
+- Updates for disabled plugins are listed as `<id> (disabled)` and skipped by
+  `update --all`. Mention that the plugin is off; the user may prefer to
+  remove it (`bb plugin remove`) rather than update it.
 - Updates run third-party code. Only run `update` when the user asked for
   that plugin to be updated.
 - `--out-of-range` reinstalls the plugin: settings are restored, but its

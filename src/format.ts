@@ -1,6 +1,9 @@
 // Plain-text rendering of a report for `bb plugin-updates`.
 import type { Report } from "./report";
 
+const name = (item: { id: string; disabled?: true }) =>
+  item.disabled ? `${item.id} (disabled)` : item.id;
+
 function section(title: string, lines: string[]): string[] {
   return lines.length === 0 ? [] : [`${title}:`, ...lines.map((line) => `  ${line}`), ""];
 }
@@ -9,11 +12,11 @@ export function formatReport(report: Report, checkedAt: number): string {
   const lines = [
     ...section(
       "Compatible updates",
-      report.compatible.map((i) => `${i.id}  ${i.from} → ${i.to}`),
+      report.compatible.map((i) => `${name(i)}  ${i.from} → ${i.to}`),
     ),
     ...section(
       "Newer releases outside the installed range",
-      report.outOfRange.map((i) => `${i.id}  ${i.from} → ${i.to}  ${i.compareUrl}`),
+      report.outOfRange.map((i) => `${name(i)}  ${i.from} → ${i.to}  ${i.compareUrl}`),
     ),
     ...section(
       "Blocked by engine ranges",
