@@ -16,13 +16,37 @@ interface FakePlugin {
   };
 }
 
-/** A tiny stand-in for bb's plugin registry that sdk.plugins operates on. */
-function fakeRegistry(initial: Record<string, FakePlugin>) {
+/**
+ * A tiny stand-in for bb's plugin registry that sdk.plugins operates on.
+ * Like bb, removing a plugin deletes its settings; `failInstall` makes
+ * installs of matching sources throw.
+ */
+function fakeRegistry(
+  initial: Record<string, FakePlugin>,
+  failInstall: (source: string) => boolean = () => false,
+) {
   const installed = new Map(Object.entries(initial));
+  const removed = new Map<string, FakePlugin>();
+  const startedUpdates: string[] = [];
   const display = (p: FakePlugin) => `${p.source} (${p.version})`;
   return {
     installed,
+    startedUpdates,
     plugins: {
+      experimental_updateJobs: {
+        list: async () =>
+          startedUpdates.map((pluginId) => ({
+            id: `job-${pluginId}`,
+            pluginId,
+            displayName: pluginId,
+            state: "running",
+            phase: "activating",
+          })),
+      },
+      experimental_startUpdate: async ({ pluginId }: { pluginId: string }) => {
+        startedUpdates.push(pluginId);
+        return { id: `job-${pluginId}`, pluginId, displayName: pluginId, state: "queued" };
+      },
       list: async () => ({
         plugins: [...installed].map(([id, p]) => ({ id, source: p.source, version: p.version })),
       }),
@@ -36,6 +60,24 @@ function fakeRegistry(initial: Record<string, FakePlugin>) {
         const p = installed.get(pluginId)!;
         return { requested: p.source, resolved: display(p), engines: {}, history: [], ...p.detail };
       },
+      remove: async ({ pluginId }: { pluginId: string }) => {
+        removed.set(pluginId, installed.get(pluginId)!);
+        installed.delete(pluginId);
+        return { ok: true };
+      },
+      install: async ({ source }: { source: string }) => {
+        if (failInstall(source)) throw new Error(`build failed for ${source}`);
+        const [id, previous] = [...removed].find(([, p]) => sameRepo(p.source, source))!;
+        removed.delete(id);
+        const settings = previous.settings && { ...previous.settings, values: {} };
+        installed.set(id, { ...previous, source, settings });
+        return { id };
+      },
+      updateSettings: async ({ pluginId, values }: { pluginId: string; values: Record<string, unknown> }) => {
+        const p = installed.get(pluginId)!;
+        p.settings = { ...p.settings!, values: { ...p.settings!.values, ...values } };
+        return { ok: true, ...p.settings };
+      },
       getSettings: async ({ pluginId }: { pluginId: string }) => ({
         ok: true,
         ...(installed.get(pluginId)!.settings ?? { schema: {}, values: {} }),
@@ -45,6 +87,7 @@ function fakeRegistry(initial: Record<string, FakePlugin>) {
 }
 
 const sha = (n: number) => String(n).repeat(40);
+const sameRepo = (a: string, b: string) => a.split("@")[0] === b.split("@")[0];
 
 const homepage: FakePlugin = {
   source: "git:https://github.com/y/bb-homepage.git@semver:^0.2.0",
@@ -83,6 +126,14 @@ async function load(registry: ReturnType<typeof fakeRegistry>, settings = {}) {
     (await host.harness.behavior.callRpc(method, input)) as T;
   return { ...host, rpc };
 }
+
+const agentBoardWithSettings: FakePlugin = {
+  ...agentBoard,
+  settings: {
+    schema: { theme: { type: "string", label: "Theme" } },
+    values: { theme: "dark" },
+  },
+};
 
 describe("plugin-updates backend", () => {
   beforeEach(() => {
@@ -198,5 +249,154 @@ describe("plugin-updates backend", () => {
         .filter((signal) => signal.channel === "report-changed")
         .map((signal) => signal.payload),
     ).toEqual([{ badgeCount: 1 }, { badgeCount: 0 }]);
+  });
+
+  it("update all starts bb jobs for compatible updates only, skipping ignored ones", async () => {
+    const registry = fakeRegistry({
+      homepage,
+      "agent-board": agentBoard,
+      chat: { ...homepage, check: { ...homepage.check, candidate: { version: "c0ffee1", display: "chat@v0.2" } } },
+    });
+    vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+      url.includes("agent-board") ? agentBoardTags : "",
+    );
+    const { rpc } = await load(registry);
+    await rpc("check");
+    await rpc("ignore", { id: "chat", version: "c0ffee1" });
+
+    const { jobs } = await rpc<{ jobs: Array<{ pluginId: string; state: string }> }>("update_all");
+
+    expect(registry.startedUpdates).toEqual(["homepage"]);
+    expect(jobs).toMatchObject([{ pluginId: "homepage", state: "queued" }]);
+  });
+
+  it("a single compatible update starts a job the page can follow", async () => {
+    const registry = fakeRegistry({ homepage });
+    vi.mocked(listRemoteTags).mockResolvedValue("");
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const started = await rpc<{ kind: string; job: { id: string } }>("update", { id: "homepage" });
+    const { jobs } = await rpc<{ jobs: Array<{ id: string; state: string }> }>("jobs");
+
+    expect(started).toMatchObject({ kind: "job", job: { id: "job-homepage" } });
+    expect(jobs).toMatchObject([{ id: "job-homepage", state: "running" }]);
+  });
+
+  it("moves a plugin to a newer release outside its range, keeping its settings", async () => {
+    const registry = fakeRegistry({
+      "agent-board": {
+        ...agentBoard,
+        settings: {
+          schema: { theme: { type: "string", label: "Theme" } },
+          values: { theme: "dark" },
+        },
+      },
+    });
+    vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const result = await rpc("update_out_of_range", { id: "agent-board" });
+
+    expect(result).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
+    expect(registry.installed.get("agent-board")).toMatchObject({
+      source: "git:https://github.com/a/bb-plugin-agent-board.git@semver:^0.9.2",
+      settings: { values: { theme: "dark" } },
+    });
+  });
+
+  it("rolls back to the old source when the new release fails to install", async () => {
+    const registry = fakeRegistry(
+      { "agent-board": agentBoardWithSettings },
+      (source) => source.endsWith("^0.9.2"),
+    );
+    vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const result = await rpc("update_out_of_range", { id: "agent-board" });
+
+    expect(result).toEqual({
+      kind: "rolled-back",
+      error: "build failed for git:https://github.com/a/bb-plugin-agent-board.git@semver:^0.9.2",
+    });
+    expect(registry.installed.get("agent-board")).toMatchObject({
+      source: agentBoard.source,
+      settings: { values: { theme: "dark" } },
+    });
+  });
+
+  it("hands back a reinstall command when the rollback fails too", async () => {
+    const registry = fakeRegistry({ "agent-board": agentBoardWithSettings }, () => true);
+    vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const result = await rpc("update_out_of_range", { id: "agent-board" });
+
+    expect(result).toEqual({
+      kind: "failed",
+      error: `build failed for ${agentBoard.source}`,
+      command: `bb plugin install '${agentBoard.source}'`,
+    });
+    expect(registry.installed.has("agent-board")).toBe(false);
+  });
+
+  it("leaves a plugin with secret settings alone and returns the manual steps", async () => {
+    const registry = fakeRegistry({
+      "agent-board": {
+        ...agentBoard,
+        detail: { ...agentBoard.detail, subdirectory: "plugins/board" },
+        settings: {
+          schema: { apiKey: { type: "string", label: "API key", secret: true } },
+          values: {},
+        },
+      },
+    });
+    vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const result = await rpc("update_out_of_range", { id: "agent-board" });
+
+    expect(result).toEqual({
+      kind: "manual",
+      reason: "secret-settings",
+      command:
+        "bb plugin remove agent-board && bb plugin install " +
+        "'git:https://github.com/a/bb-plugin-agent-board.git@semver:^0.9.2' --subdirectory 'plugins/board'",
+    });
+    expect(registry.installed.get("agent-board")?.source).toBe(agentBoard.source);
+  });
+
+  it("will not remove itself to update; returns the manual steps instead", async () => {
+    const registry = fakeRegistry({
+      "plugin-updates": {
+        source: "git:https://github.com/f/bb-plugin-updates.git@semver:^0.1.0",
+        version: "0.1.0",
+        detail: { range: "^0.1.0", resolvedTag: "v0.1.0" },
+        check: { outcome: "current" },
+      },
+    });
+    vi.mocked(listRemoteTags).mockResolvedValue(`${sha(1)}\trefs/tags/v0.2.0`);
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const result = await rpc("update_out_of_range", { id: "plugin-updates" });
+
+    expect(result).toMatchObject({ kind: "manual", reason: "self" });
+    expect(registry.installed.has("plugin-updates")).toBe(true);
+  });
+
+  it("moves a plugin with no settings without touching settings", async () => {
+    const registry = fakeRegistry({ "agent-board": agentBoard });
+    vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+    const { rpc } = await load(registry);
+    await rpc("check");
+
+    const result = await rpc("update_out_of_range", { id: "agent-board" });
+
+    expect(result).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
   });
 });

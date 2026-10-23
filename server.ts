@@ -15,11 +15,35 @@ import {
 const versionRef = z.object({ id: z.string().min(1), version: z.string().min(1) });
 const reportOutput = z.object({ report: z.custom<Report>(), checkedAt: z.number() }).nullable();
 
+export type UpdateJob = Awaited<
+  ReturnType<BbPluginApi["sdk"]["plugins"]["experimental_startUpdate"]>
+>;
+const jobsOutput = z.object({ jobs: z.array(z.custom<UpdateJob>()) });
+const pluginRef = z.object({ id: z.string().min(1) });
+const updateOutput = z.object({ kind: z.literal("job"), job: z.custom<UpdateJob>() });
+
+export type OutOfRangeResult =
+  | { kind: "updated"; from: string; to: string }
+  | { kind: "rolled-back"; error: string }
+  | { kind: "failed"; error: string; command: string }
+  | { kind: "manual"; reason: "secret-settings" | "self"; command: string };
+
+function installCommand(source: string, subdirectory: string | undefined): string {
+  const sub = subdirectory === undefined ? "" : ` --subdirectory '${subdirectory}'`;
+  return `bb plugin install '${source}'${sub}`;
+}
+
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
 export const rpcContract = defineRpcContract({
   check: { input: z.null(), output: reportOutput },
   report: { input: z.null(), output: reportOutput },
   ignore: { input: versionRef, output: reportOutput },
   unignore: { input: versionRef, output: reportOutput },
+  update: { input: pluginRef, output: updateOutput },
+  update_all: { input: z.null(), output: jobsOutput },
+  jobs: { input: z.null(), output: jobsOutput },
+  update_out_of_range: { input: pluginRef, output: z.custom<OutOfRangeResult>() },
 });
 
 /** The last check's raw results; the report is rebuilt from it on demand. */
@@ -58,7 +82,7 @@ export default async function plugin(bb: BbPluginApi) {
       const lsRemote = await listRemoteTags(target.url);
       return resolveNewerRelease({ source, installedVersion: version, lsRemote });
     } catch (error) {
-      return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+      return { kind: "failed", error: message(error) };
     }
   }
 
@@ -116,10 +140,83 @@ export default async function plugin(bb: BbPluginApi) {
     return publishReport();
   }
 
+  /** Out-of-range updates are never included: each needs its own confirmation. */
+  async function updateAllCompatible() {
+    const current = await currentReport();
+    const ids = current?.report.compatible.map(({ id }) => id) ?? [];
+    const jobs = [];
+    for (const pluginId of ids) jobs.push(await plugins.experimental_startUpdate({ pluginId }));
+    return { jobs };
+  }
+
+  /**
+   * bb refuses to install an installed plugin again, so moving outside the
+   * range means remove + install — and remove deletes the plugin's settings.
+   * Snapshot them first and restore them after.
+   */
+  async function updateOutOfRange(id: string): Promise<OutOfRangeResult> {
+    const item = (await currentReport())?.report.outOfRange.find((i) => i.id === id);
+    if (item === undefined) throw new Error(`No newer release outside the range for ${id}`);
+    const [source, settings] = await Promise.all([
+      plugins.getSource({ pluginId: id }),
+      plugins.getSettings({ pluginId: id }),
+    ]);
+    const manual = (reason: "secret-settings" | "self") => ({
+      kind: "manual" as const,
+      reason,
+      command: `bb plugin remove ${id} && ${installCommand(item.newSource, source.subdirectory)}`,
+    });
+    // Removing ourselves would kill this very flow, rollback included.
+    if (id === bb.pluginId) return manual("self");
+    // Secret values can't be read back, so they'd be lost on remove.
+    if (Object.values(settings.schema).some((field) => "secret" in field && field.secret)) {
+      return manual("secret-settings");
+    }
+    const install = (requested: string) =>
+      plugins.install({
+        source: requested,
+        ...(source.subdirectory === undefined ? {} : { subdirectory: source.subdirectory }),
+      });
+
+    const restoreSettings = async () => {
+      if (Object.keys(settings.values).length === 0) return;
+      await plugins.updateSettings({ pluginId: id, values: settings.values });
+    };
+
+    await plugins.remove({ pluginId: id });
+    try {
+      await install(item.newSource);
+    } catch (error) {
+      try {
+        await install(source.requested);
+      } catch (rollbackError) {
+        await check();
+        return {
+          kind: "failed",
+          error: message(rollbackError),
+          command: installCommand(source.requested, source.subdirectory),
+        };
+      }
+      await restoreSettings();
+      await check();
+      return { kind: "rolled-back", error: message(error) };
+    }
+    await restoreSettings();
+    await check();
+    return { kind: "updated", from: item.from, to: item.to };
+  }
+
   bb.rpc.register(rpcContract, {
     check: () => check(),
     report: () => currentReport(),
     ignore: ({ id, version }) => setIgnored(id, version, true),
     unignore: ({ id, version }) => setIgnored(id, version, false),
+    update: async ({ id }) => ({
+      kind: "job" as const,
+      job: await plugins.experimental_startUpdate({ pluginId: id }),
+    }),
+    update_all: () => updateAllCompatible(),
+    update_out_of_range: ({ id }) => updateOutOfRange(id),
+    jobs: async () => ({ jobs: await plugins.experimental_updateJobs.list() }),
   });
 }
