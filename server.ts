@@ -3,6 +3,7 @@
 // range or pin), and applies both.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { formatReport } from "./src/format";
 import { listRemoteTags } from "./src/git";
 import { releaseCheckTarget, resolveNewerRelease } from "./src/releases";
 import {
@@ -57,6 +58,11 @@ type VersionsById = Record<string, string[]>;
 
 /** Realtime channel the app toasts from; payload `{ updates: [{ id, version }] }`. */
 const NEW_UPDATES = "new-updates";
+const CHECK_CRON: Record<string, string> = {
+  "1h": "0 * * * *",
+  "6h": "0 */6 * * *",
+  "24h": "0 9 * * *",
+};
 /** Realtime channel every page and the badge refetch on; payload `{ badgeCount }`. */
 const REPORT_CHANGED = "report-changed";
 
@@ -71,8 +77,15 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Off: only the badge shows new updates.",
       default: true,
     },
+    checkInterval: {
+      type: "select",
+      label: "Check for updates every",
+      description: "Reload the plugin after changing this.",
+      options: ["1h", "6h", "24h", "off"],
+      default: "6h",
+    },
   });
-  const { toastOnNewUpdate } = await settings.get();
+  const { toastOnNewUpdate, checkInterval } = await settings.get();
 
   async function checkRelease(id: string, version: string): Promise<ReleaseResult> {
     const source = await plugins.getSource({ pluginId: id });
@@ -206,6 +219,24 @@ export default async function plugin(bb: BbPluginApi) {
     return { kind: "updated", from: item.from, to: item.to };
   }
 
+  const cron = CHECK_CRON[checkInterval];
+  if (cron !== undefined) {
+    bb.background.schedule("check", cron, async () => {
+      await check();
+    });
+    bb.background.service("check-on-load", {
+      async start(signal) {
+        try {
+          await check();
+        } catch (error) {
+          bb.log.warn(`check on load failed: ${message(error)}`);
+        }
+        if (signal.aborted) return;
+        await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+      },
+    });
+  }
+
   bb.rpc.register(rpcContract, {
     check: () => check(),
     report: () => currentReport(),
@@ -218,5 +249,122 @@ export default async function plugin(bb: BbPluginApi) {
     update_all: () => updateAllCompatible(),
     update_out_of_range: ({ id }) => updateOutOfRange(id),
     jobs: async () => ({ jobs: await plugins.experimental_updateJobs.list() }),
+  });
+
+  const usage = [
+    "Usage:",
+    "  bb plugin-updates list [--json]",
+    "  bb plugin-updates check [--json]",
+    "  bb plugin-updates update <id> [--out-of-range]",
+    "  bb plugin-updates update --all",
+    "  bb plugin-updates ignore <id>",
+  ].join("\n");
+
+  function describeOutOfRange(id: string, result: OutOfRangeResult) {
+    switch (result.kind) {
+      case "updated":
+        return { exitCode: 0, stdout: `Updated ${id} ${result.from} → ${result.to}.` };
+      case "rolled-back":
+        return { exitCode: 1, stderr: `Update failed; ${id} is back on its old version. ${result.error}` };
+      case "failed":
+        return {
+          exitCode: 1,
+          stderr: `Update and rollback failed; ${id} is not installed. ${result.error}\nReinstall it with:\n  ${result.command}`,
+        };
+      case "manual":
+        return {
+          exitCode: 1,
+          stderr: `${id} ${result.reason === "self" ? "can't remove itself" : "has secret settings that a reinstall would lose"}. Update it by hand:\n  ${result.command}`,
+        };
+    }
+  }
+
+  async function updateFromCli(id: string, outOfRange: boolean) {
+    const report = (await currentReport())?.report;
+    if (outOfRange) return describeOutOfRange(id, await updateOutOfRange(id));
+    if (report?.compatible.some((i) => i.id === id)) {
+      const job = await plugins.experimental_startUpdate({ pluginId: id });
+      return {
+        exitCode: 0,
+        stdout: `Started updating ${id} (job ${job.id}). Follow it with "bb plugin update-jobs".`,
+      };
+    }
+    const newer = report?.outOfRange.find((i) => i.id === id);
+    return {
+      exitCode: 1,
+      stderr:
+        newer === undefined
+          ? `No update for ${id}. Run "bb plugin-updates check" first.`
+          : `${id} ${newer.to} is outside its installed range, so updating reinstalls it ` +
+            `(settings are restored; storage and schedules may reset). ` +
+            `Compare: ${newer.compareUrl}\nRe-run with --out-of-range to go ahead.`,
+    };
+  }
+  bb.cli.register({
+    name: "plugin-updates",
+    summary: "List and apply plugin updates, including releases outside a plugin's range",
+    commands: [
+      { name: "list", summary: "Show the last check's updates", usage: "bb plugin-updates list [--json]" },
+      { name: "check", summary: "Check for updates now", usage: "bb plugin-updates check [--json]" },
+      {
+        name: "update",
+        summary: "Update a plugin; --out-of-range moves it past its range",
+        usage: "bb plugin-updates update <id> [--out-of-range] | update --all",
+      },
+      {
+        name: "ignore",
+        summary: "Hide a plugin's pending versions until a newer one appears",
+        usage: "bb plugin-updates ignore <id>",
+      },
+    ],
+    async run(argv) {
+      const json = argv.includes("--json");
+      const outOfRange = argv.includes("--out-of-range");
+      const [command, ...args] = argv.filter((arg) => !arg.startsWith("--"));
+      const show = (current: Awaited<ReturnType<typeof currentReport>>) => ({
+        exitCode: 0,
+        stdout: json
+          ? JSON.stringify(current)
+          : current === null
+            ? 'Not checked yet. Run "bb plugin-updates check".'
+            : formatReport(current.report, current.checkedAt),
+      });
+      switch (command) {
+        case undefined:
+        case "help":
+        case "--help":
+          return { exitCode: 0, stdout: usage };
+        case "list":
+          return show(await currentReport());
+        case "check":
+          return show(await check());
+        case "update":
+          if (argv.includes("--all") && args.length === 0) {
+            const { jobs } = await updateAllCompatible();
+            return {
+              exitCode: 0,
+              stdout:
+                jobs.length === 0
+                  ? "No compatible updates."
+                  : jobs.map((job) => `Started updating ${job.pluginId} (job ${job.id}).`).join("\n"),
+            };
+          }
+          if (args.length !== 1) break;
+          return updateFromCli(args[0]!, outOfRange);
+        case "ignore": {
+          if (args.length !== 1) break;
+          const id = args[0]!;
+          const report = (await currentReport())?.report;
+          const pending = [...(report?.compatible ?? []), ...(report?.outOfRange ?? [])].filter(
+            (i) => i.id === id,
+          );
+          if (pending.length === 0) return { exitCode: 1, stderr: `No pending update for ${id}.` };
+          for (const { version } of pending) await setIgnored(id, version, true);
+          const shown = pending.map((i) => ("newSource" in i ? i.to : i.version)).join(", ");
+          return { exitCode: 0, stdout: `Ignoring ${id} ${shown}.` };
+        }
+      }
+      return { exitCode: 1, stderr: usage };
+    },
   });
 }

@@ -399,4 +399,112 @@ describe("plugin-updates backend", () => {
 
     expect(result).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
   });
+
+  it.each([
+    [undefined, "0 */6 * * *"],
+    ["1h", "0 * * * *"],
+    ["24h", "0 9 * * *"],
+  ])("checks on a schedule (interval %s → %s)", async (interval, cron) => {
+    const registry = fakeRegistry({ homepage });
+    vi.mocked(listRemoteTags).mockResolvedValue("");
+    const { rpc, harness } = await load(
+      registry,
+      interval === undefined ? {} : { checkInterval: interval },
+    );
+
+    expect(harness.inspection.registrations.schedules).toMatchObject([{ name: "check", cron }]);
+    await harness.behavior.runSchedule("check");
+    expect(await rpc<{ report: RpcReport }>("report")).toMatchObject({
+      report: { badgeCount: 1 },
+    });
+  });
+
+  it("does not schedule checks when the interval is off", async () => {
+    const { harness } = await load(fakeRegistry({}), { checkInterval: "off" });
+
+    expect(harness.inspection.registrations.schedules).toEqual([]);
+  });
+
+  it("checks once when the plugin loads", async () => {
+    vi.mocked(listRemoteTags).mockResolvedValue("");
+    const { rpc, harness } = await load(fakeRegistry({ homepage }));
+
+    const service = harness.behavior.runService("check-on-load");
+    await vi.waitFor(async () =>
+      expect(await rpc<{ report: RpcReport } | null>("report")).not.toBeNull(),
+    );
+    service.controller.abort();
+    await service.done;
+  });
+
+  describe("bb plugin-updates", () => {
+    it("check and list show both kinds of update", async () => {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("agent-board") ? agentBoardTags : "",
+      );
+      const { harness } = await load(fakeRegistry({ homepage, "agent-board": agentBoard }));
+
+      const checked = await harness.behavior.runCli(["check"]);
+      const listed = await harness.behavior.runCli(["list"]);
+
+      expect(checked.exitCode).toBe(0);
+      expect(listed.stdout).toBe(checked.stdout);
+      expect(listed.stdout).toContain(
+        "Compatible updates:\n  homepage  git:https://github.com/y/bb-homepage.git@semver:^0.2.0 (0.2.5) → bb-homepage@v0.2.7",
+      );
+      expect(listed.stdout).toContain(
+        "Newer releases outside the installed range:\n  agent-board  0.7.0 → 0.9.2  https://github.com/a/bb-plugin-agent-board/compare/v0.7.0...v0.9.2",
+      );
+    });
+ 
+    it("update starts a compatible update, and demands --out-of-range for the other kind", async () => {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("agent-board") ? agentBoardTags : "",
+      );
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard });
+      const { harness } = await load(registry);
+      await harness.behavior.runCli(["check"]);
+
+      const compatible = await harness.behavior.runCli(["update", "homepage"]);
+      expect(compatible).toMatchObject({ exitCode: 0 });
+      expect(compatible.stdout).toContain("Started updating homepage");
+      expect(registry.startedUpdates).toEqual(["homepage"]);
+
+      const refused = await harness.behavior.runCli(["update", "agent-board"]);
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain("--out-of-range");
+      expect(registry.installed.get("agent-board")?.source).toBe(agentBoard.source);
+
+      const moved = await harness.behavior.runCli(["update", "agent-board", "--out-of-range"]);
+      expect(moved).toMatchObject({ exitCode: 0, stdout: "Updated agent-board 0.7.0 → 0.9.2." });
+    });
+ 
+    it("update --all starts every compatible update", async () => {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("agent-board") ? agentBoardTags : "",
+      );
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard });
+      const { harness } = await load(registry);
+      await harness.behavior.runCli(["check"]);
+
+      const result = await harness.behavior.runCli(["update", "--all"]);
+
+      expect(result).toMatchObject({ exitCode: 0 });
+      expect(result.stdout).toContain("Started updating homepage");
+      expect(registry.startedUpdates).toEqual(["homepage"]);
+    });
+ 
+    it("ignore hides a plugin's pending versions", async () => {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("agent-board") ? agentBoardTags : "",
+      );
+      const { harness, rpc } = await load(fakeRegistry({ homepage, "agent-board": agentBoard }));
+      await harness.behavior.runCli(["check"]);
+
+      const result = await harness.behavior.runCli(["ignore", "agent-board"]);
+
+      expect(result).toMatchObject({ exitCode: 0, stdout: "Ignoring agent-board 0.9.2." });
+      expect(await rpc("report")).toMatchObject({ report: { badgeCount: 1 } });
+    });
+  });
 });
