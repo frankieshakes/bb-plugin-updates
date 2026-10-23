@@ -254,7 +254,7 @@ export default async function plugin(bb: BbPluginApi) {
   const usage = [
     "Usage:",
     "  bb plugin-updates list [--json]",
-    "  bb plugin-updates check [--json]",
+    "  bb plugin-updates check [--json] [--reannounce]",
     "  bb plugin-updates update <id> [--out-of-range]",
     "  bb plugin-updates update --all",
     "  bb plugin-updates ignore <id>",
@@ -305,7 +305,11 @@ export default async function plugin(bb: BbPluginApi) {
     summary: "List and apply plugin updates, including releases outside a plugin's range",
     commands: [
       { name: "list", summary: "Show the last check's updates", usage: "bb plugin-updates list [--json]" },
-      { name: "check", summary: "Check for updates now", usage: "bb plugin-updates check [--json]" },
+      {
+        name: "check",
+        summary: "Check for updates now; --reannounce toasts already-announced ones again",
+        usage: "bb plugin-updates check [--json] [--reannounce]",
+      },
       {
         name: "update",
         summary: "Update a plugin; --out-of-range moves it past its range",
@@ -337,6 +341,7 @@ export default async function plugin(bb: BbPluginApi) {
         case "list":
           return show(await currentReport());
         case "check":
+          if (argv.includes("--reannounce")) await kv.delete("seen");
           return show(await check());
         case "update":
           if (argv.includes("--all") && args.length === 0) {

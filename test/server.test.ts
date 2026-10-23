@@ -506,5 +506,17 @@ describe("plugin-updates backend", () => {
       expect(result).toMatchObject({ exitCode: 0, stdout: "Ignoring agent-board 0.9.2." });
       expect(await rpc("report")).toMatchObject({ report: { badgeCount: 1 } });
     });
+ 
+    it("check --reannounce toasts already-announced updates again", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const { harness } = await load(fakeRegistry({ homepage }));
+      await harness.behavior.runCli(["check"]);
+
+      await harness.behavior.runCli(["check", "--reannounce"]);
+
+      expect(
+        harness.inspection.realtimeSignals.filter((signal) => signal.channel === "new-updates"),
+      ).toHaveLength(2);
+    });
   });
 });
