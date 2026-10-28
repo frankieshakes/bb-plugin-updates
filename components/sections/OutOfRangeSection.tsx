@@ -13,7 +13,7 @@ export function OutOfRangeSection({
   onIgnore,
 }: {
   items: OutOfRangeItem[];
-  /** The plugin's queued or running update, if any. */
+  /** The plugin's pending update, if any. */
   stateFor: (id: string) => Exclude<OutOfRangeEntry["state"], "done"> | undefined;
   onUpdate: (item: OutOfRangeItem) => void;
   onIgnore: (id: string, version: string) => void;
@@ -37,7 +37,13 @@ export function OutOfRangeSection({
                   onClick={() => onUpdate(item)}
                   disabled={state !== undefined}
                 >
-                  {state === "queued" ? "Queued" : state === "running" ? "Updating…" : "Update"}
+                  {state === "queued"
+                    ? "Queued"
+                    : state === "waiting"
+                      ? "Waiting…"
+                      : state === "running"
+                        ? "Updating…"
+                        : "Update"}
                 </Button>
               </>
             }

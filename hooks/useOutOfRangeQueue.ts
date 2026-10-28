@@ -52,7 +52,7 @@ export function useOutOfRangeQueue(onChange?: (entry: OutOfRangeEntry) => void) 
     refetch();
     return request;
   };
-  /** The plugin's queued or running update, if any. */
+  /** The plugin's pending (not done) update, if any. */
   const stateFor = (id: string) => {
     const state = entries.find((entry) => entry.id === id && entry.state !== "done")?.state;
     return state === "done" ? undefined : state;

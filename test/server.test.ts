@@ -29,10 +29,13 @@ function fakeRegistry(
   const installed = new Map(Object.entries(initial));
   const removed = new Map<string, FakePlugin>();
   const startedUpdates: string[] = [];
+  const finishedUpdates = new Set<string>();
   const display = (p: FakePlugin) => `${p.source} (${p.version})`;
   return {
     installed,
     startedUpdates,
+    /** Jobs run until finished here. */
+    finishUpdate: (pluginId: string) => finishedUpdates.add(pluginId),
     plugins: {
       experimental_updateJobs: {
         list: async () =>
@@ -40,8 +43,9 @@ function fakeRegistry(
             id: `job-${pluginId}`,
             pluginId,
             displayName: pluginId,
-            state: "running",
-            phase: "activating",
+            ...(finishedUpdates.has(pluginId)
+              ? { state: "completed", result: { outcome: "updated" } }
+              : { state: "running", phase: "activating" }),
           })),
       },
       experimental_startUpdate: async ({ pluginId }: { pluginId: string }) => {
@@ -127,7 +131,7 @@ async function load(registry: ReturnType<typeof fakeRegistry>, settings = {}) {
     settings,
     sdk: { plugins: registry.plugins },
   });
-  await plugin(host.bb);
+  await plugin(host.bb, { jobPollMs: 10 });
   const rpc = async <T>(method: string, input: unknown = null) =>
     (await host.harness.behavior.callRpc(method, input)) as T;
   return { ...host, rpc };
@@ -175,6 +179,14 @@ function holdInstalls(registry: ReturnType<typeof fakeRegistry>) {
       }),
   };
 }
+
+/** A plugin with both a compatible update and a newer release outside its range. */
+const both = (name: string): FakePlugin => ({ ...board(name), check: homepage.check });
+
+const deferredSignals = (harness: Awaited<ReturnType<typeof load>>["harness"]) =>
+  harness.inspection.realtimeSignals
+    .filter((signal) => signal.channel === "deferred-update")
+    .map((signal) => signal.payload);
 
 const states = async (rpc: Rpc) =>
   Object.fromEntries((await queue(rpc)).map((e) => [e.id, e.state]));
@@ -646,6 +658,108 @@ describe("plugin-updates backend", () => {
 
       expect(await cli).toMatchObject({ exitCode: 0, stdout: "Updated b 0.7.0 → 0.9.2." });
       expect(await states(rpc)).toEqual({ a: "done", b: "done" });
+    });
+  });
+
+  describe("one update at a time per plugin", () => {
+    beforeEach(() => {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("homepage") ? "" : agentBoardTags,
+      );
+    });
+
+    it("an out-of-range update waits for the plugin's bb update job, then runs", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      await rpc("update", { id: "a" });
+
+      await rpc("update_out_of_range", { id: "a" });
+      await vi.waitFor(async () => expect(await states(rpc)).toEqual({ a: "waiting" }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await states(rpc)).toEqual({ a: "waiting" });
+      expect(registry.installed.get("a")?.source).toBe(board("a").source);
+
+      registry.finishUpdate("a");
+      await vi.waitFor(async () => expect(await states(rpc)).toEqual({ a: "done" }));
+      expect((await queue(rpc))[0]?.result).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
+      expect(
+        harness.inspection.realtimeSignals
+          .filter((signal) => signal.channel === "out-of-range-changed")
+          .map((signal) => (signal.payload as { state: string }).state),
+      ).toEqual(["queued", "waiting", "running", "done"]);
+    });
+
+    it("an out-of-range update goes ahead when bb's jobs can't be listed", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      registry.plugins.experimental_updateJobs.list = async () => {
+        throw new Error("jobs unavailable");
+      };
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+
+      const result = await updateOutOfRange(rpc, "a");
+
+      expect(result).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
+      expect(harness.inspection.logEntries).toContainEqual({
+        level: "warn",
+        message: "listing update jobs failed, so not waiting on a's: jobs unavailable",
+      });
+    });
+
+    it("a compatible update during an out-of-range one is deferred, then started", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      const installs = holdInstalls(registry);
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      await rpc("update_out_of_range", { id: "a" });
+
+      const request = await rpc("update", { id: "a" });
+      expect(request).toEqual({ kind: "deferred", id: "a" });
+      expect(registry.startedUpdates).toEqual([]);
+
+      await installs.release();
+      await vi.waitFor(() => expect(registry.startedUpdates).toEqual(["a"]));
+      expect(deferredSignals(harness)).toEqual([{ id: "a", outcome: "started", jobId: "job-a" }]);
+    });
+
+    it("a deferred compatible update is skipped once the plugin has none left", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      const install = registry.plugins.install;
+      registry.plugins.install = async (args: { source: string }) => {
+        const installed = await install(args);
+        registry.installed.get(installed.id)!.check = { outcome: "current" };
+        return installed;
+      };
+      const installs = holdInstalls(registry);
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      await rpc("update_out_of_range", { id: "a" });
+
+      const cli = await harness.behavior.runCli(["update", "a"]);
+      expect(cli).toMatchObject({
+        exitCode: 0,
+        stdout: "a has an out-of-range update in progress; its update starts after that, if still needed.",
+      });
+
+      await installs.release();
+      await vi.waitFor(() => expect(deferredSignals(harness)).toEqual([{ id: "a", outcome: "skipped" }]));
+      expect(registry.startedUpdates).toEqual([]);
+    });
+
+    it("update all defers only the plugin with an out-of-range update pending", async () => {
+      const registry = fakeRegistry({ homepage, a: both("a") });
+      const installs = holdInstalls(registry);
+      const { rpc } = await load(registry);
+      await rpc("check");
+      await rpc("update_out_of_range", { id: "a" });
+
+      const result = await rpc<{ jobs: Array<{ pluginId: string }>; deferred: string[] }>("update_all");
+
+      expect(result).toMatchObject({ jobs: [{ pluginId: "homepage" }], deferred: ["a"] });
+      expect(registry.startedUpdates).toEqual(["homepage"]);
+      await installs.release();
+      await vi.waitFor(() => expect(registry.startedUpdates).toEqual(["homepage", "a"]));
     });
   });
 

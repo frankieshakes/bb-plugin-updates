@@ -15,7 +15,7 @@ range. `bb plugin-updates` also finds newer git releases beyond the range
 | --- | --- |
 | `bb plugin-updates list [--json]` | Show the last check's results. |
 | `bb plugin-updates check [--json] [--reannounce]` | Check now (contacts each plugin's git remote). `--reannounce` toasts already-announced updates again. |
-| `bb plugin-updates update <id>` | Start bb's in-place update for a compatible update. |
+| `bb plugin-updates update <id>` | Start bb's in-place update for a compatible update (deferred until the plugin's pending out-of-range update, if any, is done). |
 | `bb plugin-updates update --all` | Start every compatible update. Never includes out-of-range ones. |
 | `bb plugin-updates update <id> --out-of-range` | Remove and reinstall at the newer release, restoring settings. |
 | `bb plugin-updates ignore <id>` | Hide the plugin's pending versions until a newer one appears. |

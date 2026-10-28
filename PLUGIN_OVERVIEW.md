@@ -28,7 +28,9 @@ installed with. Its settings are restored afterwards; its stored data and
 schedules may reset. If the install fails, the old version is reinstalled.
 Plugins with secret settings, which can't be read back, get the commands to
 run by hand instead. Confirmed updates run one at a time, in order, and keep
-going if you leave the page; a toast follows each one to the end.
+going if you leave the page; a toast follows each one to the end. A plugin
+never gets both kinds of update at once: whichever was asked for second
+waits for the other.
 
 Checks run when bb starts and every 6 hours by default (1h, 6h, 24h, or
 off).

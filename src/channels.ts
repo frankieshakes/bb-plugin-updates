@@ -6,3 +6,5 @@ export const NEW_UPDATES = "new-updates";
 export const REPORT_CHANGED = "report-changed";
 /** Out-of-range queue views refetch on this; payload `{ id, state }`. */
 export const OUT_OF_RANGE_CHANGED = "out-of-range-changed";
+/** A deferred compatible update started or was skipped; payload DeferredUpdate. */
+export const DEFERRED_UPDATE = "deferred-update";

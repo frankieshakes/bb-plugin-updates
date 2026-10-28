@@ -37,9 +37,18 @@ export function UpdatesPage() {
   const call = (promise: Promise<Snapshot>) => promise.then(setSnapshot, fail);
   const ignore = (id: string, version: string) => call(rpc.call("ignore", { id, version }));
   const unignore = (id: string, version: string) => call(rpc.call("unignore", { id, version }));
-  const update = (id: string) => rpc.call("update", { id }).then(({ job }) => jobs.track([job]), fail);
+  // A deferred one starts when its out-of-range update is done; UpdatesOverlay toasts that.
+  const deferred = (ids: string[]) =>
+    ids.length > 0 && toast(`Updating ${ids.join(", ")} after the out-of-range update`);
+  const update = (id: string) =>
+    rpc
+      .call("update", { id })
+      .then((request) => (request.kind === "job" ? jobs.track([request.job]) : deferred([id])), fail);
   const updateAll = () =>
-    rpc.call("update_all").then(({ jobs: started }) => jobs.track(started), fail);
+    rpc.call("update_all").then(({ jobs: started, deferred: waiting }) => {
+      jobs.track(started);
+      deferred(waiting);
+    }, fail);
 
   const report = snapshot?.report;
   return (
@@ -72,6 +81,7 @@ export function UpdatesPage() {
             <CompatibleSection
               items={report.compatible}
               isUpdating={jobs.activeFor}
+              isWaiting={(id) => outOfRange.stateFor(id) !== undefined}
               onUpdate={update}
               onUpdateAll={updateAll}
               onIgnore={ignore}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { useRpc } from "@get-bb/plugin-sdk/app";
+import { useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
+import { DEFERRED_UPDATE } from "../src/channels";
 import type { UpdateJob, rpcContract } from "../src/contract";
 
 const isActive = (job: UpdateJob) => job.state === "queued" || job.state === "running";
@@ -29,6 +30,10 @@ export function useUpdateJobs(onSettled: () => void) {
   useEffect(() => {
     poll().catch(() => undefined);
   }, [poll]);
+  // A deferred update's job is started by the server; fetching it starts the polling.
+  useRealtime(DEFERRED_UPDATE, () => {
+    poll().catch(() => undefined);
+  });
   const anyActive = jobs.some(isActive);
   useEffect(() => {
     if (!anyActive) return;

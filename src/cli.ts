@@ -13,6 +13,9 @@ const usage = [
   "  bb plugin-updates ignore <id>",
 ].join("\n");
 
+const deferredText = (id: string) =>
+  `${id} has an out-of-range update in progress; its update starts after that, if still needed.`;
+
 function describeOutOfRange(id: string, result: NonNullable<OutOfRangeEntry["result"]>) {
   switch (result.kind) {
     case "updated":
@@ -47,10 +50,13 @@ export function registerCli(bb: BbPluginApi, updates: UpdateService) {
       return describeOutOfRange(id, await updates.outOfRangeSettled(request.entry.run));
     }
     if (report?.compatible.some((i) => i.id === id)) {
-      const job = await updates.startUpdate(id);
+      const request = await updates.startOrDefer(id);
       return {
         exitCode: 0,
-        stdout: `Started updating ${id} (job ${job.id}). Follow it with "bb plugin update-jobs".`,
+        stdout:
+          request.kind === "deferred"
+            ? deferredText(id)
+            : `Started updating ${id} (job ${request.job.id}). Follow it with "bb plugin update-jobs".`,
       };
     }
     const newer = report?.outOfRange.find((i) => i.id === id);
@@ -66,14 +72,12 @@ export function registerCli(bb: BbPluginApi, updates: UpdateService) {
   }
 
   async function updateAll() {
-    const { jobs } = await updates.updateAllCompatible();
-    return {
-      exitCode: 0,
-      stdout:
-        jobs.length === 0
-          ? "No compatible updates."
-          : jobs.map((job) => `Started updating ${job.pluginId} (job ${job.id}).`).join("\n"),
-    };
+    const { jobs, deferred } = await updates.updateAllCompatible();
+    const lines = [
+      ...jobs.map((job) => `Started updating ${job.pluginId} (job ${job.id}).`),
+      ...deferred.map(deferredText),
+    ];
+    return { exitCode: 0, stdout: lines.length === 0 ? "No compatible updates." : lines.join("\n") };
   }
 
   async function ignore(id: string) {

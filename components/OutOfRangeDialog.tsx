@@ -27,7 +27,7 @@ export function OutOfRangeDialog({
   onClose,
 }: {
   item: OutOfRangeItem | null;
-  /** The plugin's queued or running update, if any. */
+  /** The plugin's pending (not done) update, if any. */
   state: Exclude<OutOfRangeEntry["state"], "done"> | undefined;
   onEnqueue: (id: string) => Promise<OutOfRangeRequest>;
   onClose: () => void;
@@ -88,9 +88,11 @@ export function OutOfRangeDialog({
             <Button onClick={confirm} disabled={pending}>
               {state === "queued"
                 ? "Queued"
-                : state === "running"
-                  ? "Updating…"
-                  : `Update to ${item.to}`}
+                : state === "waiting"
+                  ? "Waiting…"
+                  : state === "running"
+                    ? "Updating…"
+                    : `Update to ${item.to}`}
             </Button>
           ) : null}
         </DialogFooter>
