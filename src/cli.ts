@@ -1,6 +1,6 @@
 // The `bb plugin-updates` command.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { OutOfRangeResult, ReportSnapshot } from "./contract";
+import type { OutOfRangeEntry, ReportSnapshot } from "./contract";
 import { formatReport } from "./format";
 import type { UpdateService } from "./updates";
 
@@ -13,7 +13,7 @@ const usage = [
   "  bb plugin-updates ignore <id>",
 ].join("\n");
 
-function describeOutOfRange(id: string, result: OutOfRangeResult) {
+function describeOutOfRange(id: string, result: NonNullable<OutOfRangeEntry["result"]>) {
   switch (result.kind) {
     case "updated":
       return { exitCode: 0, stdout: `Updated ${id} ${result.from} → ${result.to}.` };
@@ -29,13 +29,23 @@ function describeOutOfRange(id: string, result: OutOfRangeResult) {
         exitCode: 1,
         stderr: `${id} ${result.reason === "self" ? "can't remove itself" : "has secret settings that a reinstall would lose"}. Update it by hand:\n  ${result.command}`,
       };
+    case "error":
+      return {
+        exitCode: 1,
+        stderr: `Updating ${id} failed partway; check it with "bb plugin list". ${result.error}`,
+      };
   }
 }
 
 export function registerCli(bb: BbPluginApi, updates: UpdateService) {
   async function update(id: string, outOfRange: boolean) {
     const report = (await updates.currentReport())?.report;
-    if (outOfRange) return describeOutOfRange(id, await updates.updateOutOfRange(id));
+    if (outOfRange) {
+      // Waits behind any out-of-range updates already queued (e.g. from the page).
+      const request = await updates.enqueueOutOfRange(id);
+      if (request.kind === "manual") return describeOutOfRange(id, request);
+      return describeOutOfRange(id, await updates.outOfRangeSettled(request.entry.run));
+    }
     if (report?.compatible.some((i) => i.id === id)) {
       const job = await updates.startUpdate(id);
       return {

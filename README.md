@@ -35,6 +35,11 @@ installed semver range or pin, which `bb plugin outdated` never reports.
   commit, and a tag pin moves to the newest tag. Plugins with secret
   settings, and this plugin itself, get manual steps instead.
 
+  These run one at a time on the server, in the order they're confirmed
+  (page or CLI); confirming one that's already queued or running is a no-op.
+  Every window shows the queue and toasts each update's progress and
+  outcome. The queue is in memory, so reloading the plugin drops it.
+
 ## Settings
 
 | Key | Default | |
@@ -54,7 +59,8 @@ src/                   backend + shared logic
   settings.ts          settings descriptors → check schedule
   store.ts             bb.storage.kv: last check, ignored, announced versions
   updates.ts           update service: check, report, ignore, announce, start updates
-  out-of-range.ts      remove → install → restore settings, with rollback
+  out-of-range.ts      preflight, then remove → install → restore settings, with rollback
+  out-of-range-queue.ts runs those one at a time, in order (in memory)
   cli.ts               `bb plugin-updates` command
   releases.ts          newer tags beyond a range or pin (pure)
   report.ts            page sections, badge count, ignore/disabled/toast rules (pure)
@@ -65,12 +71,13 @@ src/                   backend + shared logic
 components/            frontend components
   UpdatesPage.tsx      the page; composes sections/ and the dialog
   sections/            compatible, out-of-range, notices, collapsed lists
-  OutOfRangeDialog.tsx confirmation + manual/failed fallbacks
-  UpdatesOverlay.tsx   headless: rail count bubble + toasts
+  OutOfRangeDialog.tsx confirmation (queues the update) + manual steps
+  UpdatesOverlay.tsx   headless: rail count bubble + toasts, incl. out-of-range progress
   RailAccessory.tsx    native rail accessory (unused by bb today)
   list.tsx             Section, Collapsed, Row
   ui/                  vendored bb components
 hooks/                 useUpdates (report + realtime), useUpdateJobs (bb jobs),
+                       useOutOfRangeQueue (out-of-range queue + realtime),
                        useRailBubble (nav rail decoration)
 lib/updates.ts         frontend constants and helpers
 

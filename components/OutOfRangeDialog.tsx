@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { useRpc } from "@get-bb/plugin-sdk/app";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import type { OutOfRangeResult, rpcContract } from "../src/contract";
+import type { ManualSteps, OutOfRangeEntry, OutOfRangeRequest } from "../src/contract";
 import type { OutOfRangeItem } from "../src/report";
 import { CopyableCommand } from "@/components/CopyableCommand";
 import { ExternalLink } from "@/components/ExternalLink";
@@ -16,69 +15,41 @@ import {
 } from "@/components/ui/dialog";
 import { errorText } from "@/lib/updates";
 
-/** Out-of-range updates reinstall the plugin, so they're confirmed one by one. */
+/**
+ * Out-of-range updates reinstall the plugin, so they're confirmed one by one.
+ * Confirming queues the update on the server and closes; the overlay's toasts
+ * follow it from there. Manual steps show here, since nothing gets queued.
+ */
 export function OutOfRangeDialog({
   item,
+  state,
+  onEnqueue,
   onClose,
-  onDone,
 }: {
   item: OutOfRangeItem | null;
+  /** The plugin's queued or running update, if any. */
+  state: Exclude<OutOfRangeEntry["state"], "done"> | undefined;
+  onEnqueue: (id: string) => Promise<OutOfRangeRequest>;
   onClose: () => void;
-  onDone: () => void;
 }) {
-  const rpc = useRpc<typeof rpcContract>();
-  // Runs outlive the dialog: closing it mid-install leaves the update going.
-  const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(new Set());
-  const [result, setResult] = useState<OutOfRangeResult | null>(null);
-  const shownId = useRef<string | null>(null);
-  shownId.current = item?.id ?? null;
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<ManualSteps | null>(null);
   useEffect(() => {
     setResult(null);
   }, [item]);
   if (item === null) return null;
-  const running = runningIds.has(item.id);
+  const pending = submitting || state !== undefined;
 
-  const run = async () => {
-    const { id, from, to } = item;
-    const toastId = `out-of-range-${id}`;
-    setRunningIds((previous) => new Set(previous).add(id));
-    toast.loading(`Updating ${id} to ${to}…`, { id: toastId });
+  const confirm = async () => {
+    setSubmitting(true);
     try {
-      const outcome = await rpc.call("update_out_of_range", { id });
-      // The dialog may have closed or moved to another plugin meanwhile.
-      const shown = shownId.current === id;
-      onDone();
-      if (outcome.kind === "updated") {
-        toast.success(`Updated ${id} to ${outcome.to}`, { id: toastId });
-        if (shown) onClose();
-      } else if (outcome.kind === "rolled-back") {
-        toast.error(`Couldn't update ${id}; it's back on ${from}. ${outcome.error}`, { id: toastId });
-        if (shown) onClose();
-      } else if (shown) {
-        toast.dismiss(toastId);
-        setResult(outcome);
-      } else {
-        const message =
-          outcome.kind === "manual"
-            ? `${id} needs a manual update. Run: ${outcome.command}`
-            : `Updating ${id} and the rollback both failed, so it isn't installed. ${outcome.error} Reinstall with: ${outcome.command}`;
-        (outcome.kind === "manual" ? toast.warning : toast.error)(message, {
-          id: toastId,
-          duration: Infinity,
-          action: {
-            label: "Copy",
-            onClick: () => navigator.clipboard.writeText(outcome.command).catch(() => undefined),
-          },
-        });
-      }
+      const request = await onEnqueue(item.id);
+      if (request.kind === "manual") setResult(request);
+      else onClose();
     } catch (cause) {
-      toast.error(errorText(cause), { id: toastId });
+      toast.error(errorText(cause));
     } finally {
-      setRunningIds((previous) => {
-        const next = new Set(previous);
-        next.delete(id);
-        return next;
-      });
+      setSubmitting(false);
     }
   };
 
@@ -99,7 +70,7 @@ export function OutOfRangeDialog({
         <p className="text-sm">
           <ExternalLink href={item.compareUrl}>See what changed</ExternalLink>
         </p>
-        {result?.kind === "manual" ? (
+        {result !== null ? (
           <div className="space-y-2 text-sm">
             <p>
               {result.reason === "self"
@@ -109,22 +80,17 @@ export function OutOfRangeDialog({
             <CopyableCommand command={result.command} />
           </div>
         ) : null}
-        {result?.kind === "failed" ? (
-          <div className="space-y-2 text-sm">
-            <p className="text-destructive">
-              The update and the rollback both failed, so {item.id} isn't installed. {result.error}
-            </p>
-            <p>Reinstall it with:</p>
-            <CopyableCommand command={result.command} />
-          </div>
-        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
-            {result === null && !running ? "Cancel" : "Close"}
+            {result === null && state === undefined ? "Cancel" : "Close"}
           </Button>
           {result === null ? (
-            <Button onClick={run} disabled={running}>
-              {running ? "Updating…" : `Update to ${item.to}`}
+            <Button onClick={confirm} disabled={pending}>
+              {state === "queued"
+                ? "Queued"
+                : state === "running"
+                  ? "Updating…"
+                  : `Update to ${item.to}`}
             </Button>
           ) : null}
         </DialogFooter>

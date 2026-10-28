@@ -12,7 +12,23 @@ export type OutOfRangeResult =
   | { kind: "updated"; from: string; to: string }
   | { kind: "rolled-back"; error: string }
   | { kind: "failed"; error: string; command: string }
-  | { kind: "manual"; reason: "secret-settings" | "self"; command: string };
+  | ManualSteps;
+
+/** Returned up front, instead of queueing, when a reinstall isn't safe. */
+export type ManualSteps = { kind: "manual"; reason: "secret-settings" | "self"; command: string };
+
+/** One queued out-of-range update; `run` tells apart repeat updates of one plugin. */
+export type OutOfRangeEntry = {
+  run: number;
+  id: string;
+  from: string;
+  to: string;
+  state: "queued" | "running" | "done";
+  /** Set once done; `error` means it threw partway, so check the plugin by hand. */
+  result?: OutOfRangeResult | { kind: "error"; error: string };
+};
+
+export type OutOfRangeRequest = ManualSteps | { kind: "entry"; entry: OutOfRangeEntry };
 
 /** The last check's report; null before the first check. */
 export type ReportSnapshot = { report: Report; checkedAt: number } | null;
@@ -21,6 +37,7 @@ const versionRef = z.object({ id: z.string().min(1), version: z.string().min(1) 
 const pluginRef = z.object({ id: z.string().min(1) });
 const reportOutput = z.custom<ReportSnapshot>();
 const jobsOutput = z.object({ jobs: z.array(z.custom<UpdateJob>()) });
+const queueOutput = z.object({ entries: z.array(z.custom<OutOfRangeEntry>()) });
 const updateOutput = z.object({ kind: z.literal("job"), job: z.custom<UpdateJob>() });
 
 export const rpcContract = defineRpcContract({
@@ -31,5 +48,6 @@ export const rpcContract = defineRpcContract({
   update: { input: pluginRef, output: updateOutput },
   update_all: { input: z.null(), output: jobsOutput },
   jobs: { input: z.null(), output: jobsOutput },
-  update_out_of_range: { input: pluginRef, output: z.custom<OutOfRangeResult>() },
+  update_out_of_range: { input: pluginRef, output: z.custom<OutOfRangeRequest>() },
+  out_of_range_queue: { input: z.null(), output: queueOutput },
 });

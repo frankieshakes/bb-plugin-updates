@@ -1,11 +1,50 @@
 // Moving a plugin to a release outside its installed range or pin.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { OutOfRangeResult, ReportSnapshot } from "./contract";
+import type { ManualSteps, OutOfRangeResult, ReportSnapshot } from "./contract";
 import { message } from "./errors";
+import type { OutOfRangeItem } from "./report";
 
 export function installCommand(source: string, subdirectory: string | undefined): string {
   const sub = subdirectory === undefined ? "" : ` --subdirectory '${subdirectory}'`;
   return `bb plugin install '${source}'${sub}`;
+}
+
+/** The plugin's install, and manual steps if a reinstall isn't safe. */
+async function readInstall(bb: BbPluginApi, item: OutOfRangeItem) {
+  const { plugins } = bb.sdk;
+  const { id } = item;
+  const [source, settings] = await Promise.all([
+    plugins.getSource({ pluginId: id }),
+    plugins.getSettings({ pluginId: id }),
+  ]);
+  const manual = (reason: ManualSteps["reason"]): ManualSteps => ({
+    kind: "manual",
+    reason,
+    command: `bb plugin remove ${id} && ${installCommand(item.newSource, source.subdirectory)}`,
+  });
+  // Removing ourselves would kill this very flow, rollback included.
+  if (id === bb.pluginId) return { source, settings, manual: manual("self") };
+  // Secret values can't be read back, so they'd be lost on remove.
+  if (Object.values(settings.schema).some((field) => "secret" in field && field.secret)) {
+    return { source, settings, manual: manual("secret-settings") };
+  }
+  return { source, settings, manual: undefined };
+}
+
+/** Checks up front, before anything is queued or removed. */
+export async function preflightOutOfRange({
+  bb,
+  id,
+  currentReport,
+}: {
+  bb: BbPluginApi;
+  id: string;
+  currentReport: () => Promise<ReportSnapshot>;
+}): Promise<ManualSteps | { kind: "ready"; item: OutOfRangeItem }> {
+  const item = (await currentReport())?.report.outOfRange.find((i) => i.id === id);
+  if (item === undefined) throw new Error(`No newer release outside the range for ${id}`);
+  const { manual } = await readInstall(bb, item);
+  return manual ?? { kind: "ready", item };
 }
 
 /**
@@ -16,34 +55,16 @@ export function installCommand(source: string, subdirectory: string | undefined)
  */
 export async function updateOutOfRange({
   bb,
-  id,
-  currentReport,
-  afterwards,
+  item,
 }: {
   bb: BbPluginApi;
-  id: string;
-  currentReport: () => Promise<ReportSnapshot>;
-  /** Runs after any change to installed plugins (re-check). */
-  afterwards: () => Promise<unknown>;
+  item: OutOfRangeItem;
 }): Promise<OutOfRangeResult> {
   const { plugins } = bb.sdk;
-  const item = (await currentReport())?.report.outOfRange.find((i) => i.id === id);
-  if (item === undefined) throw new Error(`No newer release outside the range for ${id}`);
-  const [source, settings] = await Promise.all([
-    plugins.getSource({ pluginId: id }),
-    plugins.getSettings({ pluginId: id }),
-  ]);
-  const manual = (reason: "secret-settings" | "self") => ({
-    kind: "manual" as const,
-    reason,
-    command: `bb plugin remove ${id} && ${installCommand(item.newSource, source.subdirectory)}`,
-  });
-  // Removing ourselves would kill this very flow, rollback included.
-  if (id === bb.pluginId) return manual("self");
-  // Secret values can't be read back, so they'd be lost on remove.
-  if (Object.values(settings.schema).some((field) => "secret" in field && field.secret)) {
-    return manual("secret-settings");
-  }
+  const { id } = item;
+  // Read again: the settings may have changed while this waited in the queue.
+  const { source, settings, manual } = await readInstall(bb, item);
+  if (manual !== undefined) return manual;
   const install = (requested: string) =>
     plugins.install({
       source: requested,
@@ -61,7 +82,6 @@ export async function updateOutOfRange({
     try {
       await install(source.requested);
     } catch (rollbackError) {
-      await afterwards();
       return {
         kind: "failed",
         error: message(rollbackError),
@@ -69,10 +89,8 @@ export async function updateOutOfRange({
       };
     }
     await restoreSettings();
-    await afterwards();
     return { kind: "rolled-back", error: message(error) };
   }
   await restoreSettings();
-  await afterwards();
   return { kind: "updated", from: item.from, to: item.to };
 }

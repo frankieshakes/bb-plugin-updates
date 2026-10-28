@@ -40,7 +40,8 @@ export default async function plugin(bb: BbPluginApi) {
     unignore: ({ id, version }) => updates.setIgnored(id, version, false),
     update: async ({ id }) => ({ kind: "job" as const, job: await updates.startUpdate(id) }),
     update_all: () => updates.updateAllCompatible(),
-    update_out_of_range: ({ id }) => updates.updateOutOfRange(id),
+    update_out_of_range: ({ id }) => updates.enqueueOutOfRange(id),
+    out_of_range_queue: async () => ({ entries: updates.outOfRangeQueue() }),
     jobs: async () => ({ jobs: await updates.listJobs() }),
   });
 

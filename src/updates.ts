@@ -1,10 +1,11 @@
 // The update service: runs checks, builds the report, tracks ignored and
 // announced versions, and starts updates. RPC and CLI both call into it.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { NEW_UPDATES, REPORT_CHANGED } from "./channels";
+import { NEW_UPDATES, OUT_OF_RANGE_CHANGED, REPORT_CHANGED } from "./channels";
 import type { ReportSnapshot } from "./contract";
 import { listRemoteTags } from "./git";
-import { updateOutOfRange } from "./out-of-range";
+import { preflightOutOfRange, updateOutOfRange } from "./out-of-range";
+import { createOutOfRangeQueue } from "./out-of-range-queue";
 import { releaseCheckTarget, resolveNewerRelease } from "./releases";
 import { buildReport, type ReleaseResult, type Report } from "./report";
 import type { Store } from "./store";
@@ -100,6 +101,15 @@ export function createUpdateService(
     return { jobs };
   }
 
+  const outOfRange = createOutOfRangeQueue({
+    preflight: (id) => preflightOutOfRange({ bb, id, currentReport }),
+    apply: (item) => updateOutOfRange({ bb, item }),
+    // Re-check whatever happened, so every list (and the badge) catches up.
+    afterEach: () =>
+      check().catch((error) => bb.log.warn(`check after out-of-range update failed: ${message(error)}`)),
+    onChange: ({ id, state }) => bb.realtime.publish(OUT_OF_RANGE_CHANGED, { id, state }),
+  });
+
   return {
     check,
     currentReport,
@@ -107,8 +117,10 @@ export function createUpdateService(
     startUpdate,
     updateAllCompatible,
     listJobs: () => plugins.experimental_updateJobs.list(),
-    updateOutOfRange: (id: string) =>
-      updateOutOfRange({ bb, id, currentReport, afterwards: check }),
+    /** Queues an out-of-range update; manual steps come back without queueing. */
+    enqueueOutOfRange: outOfRange.enqueue,
+    outOfRangeQueue: outOfRange.list,
+    outOfRangeSettled: outOfRange.settled,
     /** Forget which versions were announced, so the next check toasts them again. */
     forgetAnnounced: () => store.forgetSeen(),
   };
