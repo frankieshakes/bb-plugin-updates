@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { OutOfRangeResult, rpcContract } from "../src/contract";
@@ -27,41 +27,63 @@ export function OutOfRangeDialog({
   onDone: () => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [running, setRunning] = useState(false);
+  // Runs outlive the dialog: closing it mid-install leaves the update going.
+  const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(new Set());
   const [result, setResult] = useState<OutOfRangeResult | null>(null);
+  const shownId = useRef<string | null>(null);
+  shownId.current = item?.id ?? null;
   useEffect(() => {
     setResult(null);
-    setRunning(false);
   }, [item]);
   if (item === null) return null;
+  const running = runningIds.has(item.id);
 
   const run = async () => {
-    setRunning(true);
+    const { id, from, to } = item;
+    const toastId = `out-of-range-${id}`;
+    setRunningIds((previous) => new Set(previous).add(id));
+    toast.loading(`Updating ${id} to ${to}…`, { id: toastId });
     try {
-      const outcome = await rpc.call("update_out_of_range", { id: item.id });
-      if (outcome.kind === "updated") {
-        toast.success(`Updated ${item.id} to ${outcome.to}`);
-        onDone();
-        onClose();
-        return;
-      }
-      if (outcome.kind === "rolled-back") {
-        toast.error(`Couldn't update ${item.id}; it's back on ${item.from}. ${outcome.error}`);
-        onDone();
-        onClose();
-        return;
-      }
-      setResult(outcome);
+      const outcome = await rpc.call("update_out_of_range", { id });
+      // The dialog may have closed or moved to another plugin meanwhile.
+      const shown = shownId.current === id;
       onDone();
+      if (outcome.kind === "updated") {
+        toast.success(`Updated ${id} to ${outcome.to}`, { id: toastId });
+        if (shown) onClose();
+      } else if (outcome.kind === "rolled-back") {
+        toast.error(`Couldn't update ${id}; it's back on ${from}. ${outcome.error}`, { id: toastId });
+        if (shown) onClose();
+      } else if (shown) {
+        toast.dismiss(toastId);
+        setResult(outcome);
+      } else {
+        const message =
+          outcome.kind === "manual"
+            ? `${id} needs a manual update. Run: ${outcome.command}`
+            : `Updating ${id} and the rollback both failed, so it isn't installed. ${outcome.error} Reinstall with: ${outcome.command}`;
+        (outcome.kind === "manual" ? toast.warning : toast.error)(message, {
+          id: toastId,
+          duration: Infinity,
+          action: {
+            label: "Copy",
+            onClick: () => navigator.clipboard.writeText(outcome.command).catch(() => undefined),
+          },
+        });
+      }
     } catch (cause) {
-      toast.error(errorText(cause));
+      toast.error(errorText(cause), { id: toastId });
     } finally {
-      setRunning(false);
+      setRunningIds((previous) => {
+        const next = new Set(previous);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
   return (
-    <Dialog open onOpenChange={(open) => (open || running ? undefined : onClose())}>
+    <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
@@ -97,8 +119,8 @@ export function OutOfRangeDialog({
           </div>
         ) : null}
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={running}>
-            {result === null ? "Cancel" : "Close"}
+          <Button variant="outline" onClick={onClose}>
+            {result === null && !running ? "Cancel" : "Close"}
           </Button>
           {result === null ? (
             <Button onClick={run} disabled={running}>
