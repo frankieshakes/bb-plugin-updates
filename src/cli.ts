@@ -32,6 +32,11 @@ function describeOutOfRange(id: string, result: NonNullable<OutOfRangeEntry["res
         exitCode: 1,
         stderr: `${id} ${result.reason === "self" ? "can't remove itself" : "has secret settings that a reinstall would lose"}. Update it by hand:\n  ${result.command}`,
       };
+    case "timed-out":
+      return {
+        exitCode: 1,
+        stderr: `Gave up waiting for ${id}'s other update to finish; nothing was changed. Try again once it's done.`,
+      };
     case "error":
       return {
         exitCode: 1,

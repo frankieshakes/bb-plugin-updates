@@ -1,5 +1,5 @@
 // Out-of-range updates run one at a time, in the order they were confirmed,
-// each after any bb update job for the same plugin ends.
+// each after any bb update job for the same plugin ends (or gives up on it).
 // The queue is in memory only: reloading this plugin (or bb) drops queued
 // entries, and cuts off a running one wherever it was.
 import type { ManualSteps, OutOfRangeEntry, OutOfRangeRequest, OutOfRangeResult } from "./contract";
@@ -15,6 +15,7 @@ export function createOutOfRangeQueue({
   preflight,
   busy,
   pollMs,
+  waitTimeoutMs,
   apply,
   afterEach,
   onChange,
@@ -23,6 +24,8 @@ export function createOutOfRangeQueue({
   /** Whether something else is updating `id`; the entry waits, re-asking every `pollMs`. Must not throw. */
   busy: (id: string) => Promise<boolean>;
   pollMs: number;
+  /** Past this, a waiting entry is done as `timed-out`, untouched. */
+  waitTimeoutMs: number;
   apply: (item: OutOfRangeItem) => Promise<OutOfRangeResult>;
   /** Runs after every entry, whatever its outcome (re-check). Must not throw. */
   afterEach: () => Promise<unknown>;
@@ -50,6 +53,27 @@ export function createOutOfRangeQueue({
     slots = slots.filter((s) => s.finishedAt === undefined || s.finishedAt > cutoff);
   };
 
+  async function run(slot: Slot): Promise<Outcome> {
+    const { id } = slot.entry;
+    // Blocks the whole queue, which is fine: bb runs one install at a time anyway.
+    if (await busy(id)) {
+      update(slot, { state: "waiting" });
+      const giveUpAt = Date.now() + waitTimeoutMs;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        if (!(await busy(id))) break;
+        // Nothing's been removed yet, so giving up is safe; a stuck job can't hold the queue.
+        if (Date.now() >= giveUpAt) return { kind: "timed-out" };
+      }
+    }
+    update(slot, { state: "running" });
+    try {
+      return await apply(slot.item);
+    } catch (error) {
+      return { kind: "error", error: message(error) };
+    }
+  }
+
   async function drain() {
     if (draining) return;
     draining = true;
@@ -57,19 +81,7 @@ export function createOutOfRangeQueue({
       for (;;) {
         const next = slots.find((s) => s.entry.state === "queued");
         if (next === undefined) return;
-        // Blocks the whole queue, which is fine: bb runs one install at a time anyway.
-        if (await busy(next.entry.id)) {
-          update(next, { state: "waiting" });
-          do await new Promise((resolve) => setTimeout(resolve, pollMs));
-          while (await busy(next.entry.id));
-        }
-        update(next, { state: "running" });
-        let result: Outcome;
-        try {
-          result = await apply(next.item);
-        } catch (error) {
-          result = { kind: "error", error: message(error) };
-        }
+        const result = await run(next);
         await afterEach();
         next.finishedAt = Date.now();
         update(next, { state: "done", result });

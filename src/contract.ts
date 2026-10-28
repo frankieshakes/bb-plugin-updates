@@ -27,8 +27,11 @@ export type OutOfRangeEntry = {
   from: string;
   to: string;
   state: "queued" | "waiting" | "running" | "done";
-  /** Set once done; `error` means it threw partway, so check the plugin by hand. */
-  result?: OutOfRangeResult | { kind: "error"; error: string };
+  /**
+   * Set once done; `error` means it threw partway, so check the plugin by hand.
+   * `timed-out`: the bb job it waited on never ended, so it gave up untouched.
+   */
+  result?: OutOfRangeResult | { kind: "error"; error: string } | { kind: "timed-out" };
 };
 
 export type OutOfRangeRequest = ManualSteps | { kind: "entry"; entry: OutOfRangeEntry };

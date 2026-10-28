@@ -12,12 +12,19 @@ import { createUpdateService } from "./src/updates";
 
 export { rpcContract };
 
-/** `jobPollMs`: how often a waiting out-of-range update re-checks bb's jobs (tests shorten it). */
-export default async function plugin(bb: BbPluginApi, { jobPollMs = 1500 } = {}) {
+/**
+ * `jobPollMs`: how often a waiting out-of-range update re-checks bb's jobs;
+ * `jobWaitTimeoutMs`: how long it waits before giving up (tests shorten both).
+ */
+export default async function plugin(
+  bb: BbPluginApi,
+  { jobPollMs = 1500, jobWaitTimeoutMs = 10 * 60_000 } = {},
+) {
   const { toastOnNewUpdate, checkCron } = await loadSettings(bb);
   const updates = createUpdateService(bb, createStore(bb.storage.kv), {
     toastOnNewUpdate,
     jobPollMs,
+    jobWaitTimeoutMs,
   });
 
   if (checkCron !== undefined) {

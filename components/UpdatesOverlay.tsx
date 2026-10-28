@@ -41,6 +41,11 @@ function toastOutOfRange({ id, from, to, state, result }: OutOfRangeEntry) {
         `${id} needs a manual update. Run: ${result.command}`,
         sticky(result.command),
       );
+    case "timed-out":
+      return toast.error(
+        `Gave up waiting for ${id}'s other update to finish; nothing was changed. Try again once it's done.`,
+        { id: toastId, duration: Infinity },
+      );
     case "error":
     case undefined:
       return toast.error(

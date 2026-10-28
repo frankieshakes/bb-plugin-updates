@@ -14,7 +14,7 @@ import { message } from "./errors";
 export function createUpdateService(
   bb: BbPluginApi,
   store: Store,
-  options: { toastOnNewUpdate: boolean; jobPollMs: number },
+  options: { toastOnNewUpdate: boolean; jobPollMs: number; jobWaitTimeoutMs: number },
 ) {
   const { plugins } = bb.sdk;
 
@@ -173,6 +173,7 @@ export function createUpdateService(
     preflight: (id) => preflightOutOfRange({ bb, id, currentReport }),
     busy: hasActiveJob,
     pollMs: options.jobPollMs,
+    waitTimeoutMs: options.jobWaitTimeoutMs,
     apply: (item) => updateOutOfRange({ bb, item }),
     // Re-check whatever happened, so every list (and the badge) catches up.
     afterEach: () =>

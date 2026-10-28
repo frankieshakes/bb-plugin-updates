@@ -125,13 +125,17 @@ type RpcReport = {
   badgeCount: number;
 };
 
-async function load(registry: ReturnType<typeof fakeRegistry>, settings = {}) {
+async function load(
+  registry: ReturnType<typeof fakeRegistry>,
+  settings = {},
+  { jobWaitTimeoutMs = 60_000 } = {},
+) {
   const host = createFakePluginHost({
     pluginId: "plugin-updates",
     settings,
     sdk: { plugins: registry.plugins },
   });
-  await plugin(host.bb, { jobPollMs: 10 });
+  await plugin(host.bb, { jobPollMs: 10, jobWaitTimeoutMs });
   const rpc = async <T>(method: string, input: unknown = null) =>
     (await host.harness.behavior.callRpc(method, input)) as T;
   return { ...host, rpc };
@@ -688,6 +692,48 @@ describe("plugin-updates backend", () => {
           .filter((signal) => signal.channel === "out-of-range-changed")
           .map((signal) => (signal.payload as { state: string }).state),
       ).toEqual(["queued", "waiting", "running", "done"]);
+    });
+
+    it("an out-of-range update gives up on a bb job that never ends, untouched, and the queue moves on", async () => {
+      const registry = fakeRegistry({ a: both("a"), b: board("b") });
+      const touched: string[] = [];
+      const remove = registry.plugins.remove;
+      registry.plugins.remove = async (args: { pluginId: string }) => {
+        touched.push(args.pluginId);
+        return remove(args);
+      };
+      const { rpc, harness } = await load(registry, {}, { jobWaitTimeoutMs: 50 });
+      await rpc("check");
+      await rpc("update", { id: "a" });
+
+      const cli = harness.behavior.runCli(["update", "a", "--out-of-range"]);
+      await vi.waitFor(async () => expect(await states(rpc)).toEqual({ a: "waiting" }));
+      const next = updateOutOfRange(rpc, "b");
+
+      expect(await cli).toMatchObject({
+        exitCode: 1,
+        stderr: "Gave up waiting for a's other update to finish; nothing was changed. Try again once it's done.",
+      });
+      expect((await queue(rpc)).find((e) => e.id === "a")?.result).toEqual({ kind: "timed-out" });
+      expect(await next).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
+      expect(touched).toEqual(["b"]);
+      expect(registry.installed.get("a")?.source).toBe(both("a").source);
+    });
+
+    it("a compatible update deferred behind a timed-out one still starts", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      const { rpc, harness } = await load(registry, {}, { jobWaitTimeoutMs: 100 });
+      await rpc("check");
+      await rpc("update", { id: "a" });
+      await rpc("update_out_of_range", { id: "a" });
+
+      expect(await rpc("update", { id: "a" })).toEqual({ kind: "deferred", id: "a" });
+
+      await vi.waitFor(() =>
+        expect(deferredSignals(harness)).toEqual([{ id: "a", outcome: "started", jobId: "job-a" }]),
+      );
+      expect((await queue(rpc))[0]?.result).toEqual({ kind: "timed-out" });
+      expect(registry.startedUpdates).toEqual(["a", "a"]);
     });
 
     it("an out-of-range update goes ahead when bb's jobs can't be listed", async () => {

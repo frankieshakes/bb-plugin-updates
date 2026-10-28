@@ -43,8 +43,9 @@ installed semver range or pin, which `bb plugin outdated` never reports.
 - **Same plugin, both kinds**: bb serializes installs, but a reinstall is
   three of them, so the two kinds never overlap for one plugin; the later one
   waits. An out-of-range update whose plugin has a bb update job shows as
-  waiting until the job ends (if bb's jobs can't be listed, it goes ahead). A
-  compatible update requested while the plugin has an out-of-range update
+  waiting until the job ends (if bb's jobs can't be listed, it goes ahead).
+  After 10 minutes it gives up untouched (`timed-out`) and the queue moves on.
+  A compatible update requested while the plugin has an out-of-range update
   pending is deferred: the request returns at once, and the job starts after
   the reinstall's re-check, or is skipped if no compatible update is left.
   Update all defers only those plugins.
