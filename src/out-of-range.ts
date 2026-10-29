@@ -13,22 +13,25 @@ export function installCommand(source: string, subdirectory: string | undefined)
 async function readInstall(bb: BbPluginApi, item: OutOfRangeItem) {
   const { plugins } = bb.sdk;
   const { id } = item;
-  const [source, settings] = await Promise.all([
+  const [source, settings, { plugins: installed }] = await Promise.all([
     plugins.getSource({ pluginId: id }),
     plugins.getSettings({ pluginId: id }),
+    plugins.list(),
   ]);
+  // A bb update job may have moved it since the check (e.g. 0.7.0 → 0.7.5).
+  const version = installed.find((p) => p.id === id)?.version ?? item.from;
   const manual = (reason: ManualSteps["reason"]): ManualSteps => ({
     kind: "manual",
     reason,
     command: `bb plugin remove ${id} && ${installCommand(item.newSource, source.subdirectory)}`,
   });
   // Removing ourselves would kill this very flow, rollback included.
-  if (id === bb.pluginId) return { source, settings, manual: manual("self") };
+  if (id === bb.pluginId) return { source, settings, version, manual: manual("self") };
   // Secret values can't be read back, so they'd be lost on remove.
   if (Object.values(settings.schema).some((field) => "secret" in field && field.secret)) {
-    return { source, settings, manual: manual("secret-settings") };
+    return { source, settings, version, manual: manual("secret-settings") };
   }
-  return { source, settings, manual: undefined };
+  return { source, settings, version, manual: undefined };
 }
 
 /** Checks up front, before anything is queued or removed. */
@@ -51,20 +54,23 @@ export async function preflightOutOfRange({
  * bb refuses to install an installed plugin again, so moving outside the
  * range means remove + install — and remove deletes the plugin's settings.
  * Snapshot them first and restore them after; reinstall the old source if the
- * new one fails.
+ * new one fails. `onStart` gets the version actually being moved from.
  */
 export async function updateOutOfRange({
   bb,
   item,
+  onStart,
 }: {
   bb: BbPluginApi;
   item: OutOfRangeItem;
+  onStart: (from: string) => void;
 }): Promise<OutOfRangeResult> {
   const { plugins } = bb.sdk;
   const { id } = item;
-  // Read again: the settings may have changed while this waited in the queue.
-  const { source, settings, manual } = await readInstall(bb, item);
+  // Read again: the settings or version may have changed while this waited in the queue.
+  const { source, settings, version, manual } = await readInstall(bb, item);
   if (manual !== undefined) return manual;
+  onStart(version);
   const install = (requested: string) =>
     plugins.install({
       source: requested,
@@ -92,5 +98,5 @@ export async function updateOutOfRange({
     return { kind: "rolled-back", error: message(error) };
   }
   await restoreSettings();
-  return { kind: "updated", from: item.from, to: item.to };
+  return { kind: "updated", from: version, to: item.to };
 }

@@ -26,7 +26,8 @@ export function createOutOfRangeQueue({
   pollMs: number;
   /** Past this, a waiting entry is done as `timed-out`, untouched. */
   waitTimeoutMs: number;
-  apply: (item: OutOfRangeItem) => Promise<OutOfRangeResult>;
+  /** Calls `onStart` with the version it re-read and moves from, which may differ from `item.from`. */
+  apply: (item: OutOfRangeItem, onStart: (from: string) => void) => Promise<OutOfRangeResult>;
   /** Runs after every entry, whatever its outcome (re-check). Must not throw. */
   afterEach: () => Promise<unknown>;
   onChange: (entry: OutOfRangeEntry) => void;
@@ -68,7 +69,9 @@ export function createOutOfRangeQueue({
     }
     update(slot, { state: "running" });
     try {
-      return await apply(slot.item);
+      return await apply(slot.item, (from) => {
+        if (from !== slot.entry.from) update(slot, { from });
+      });
     } catch (error) {
       return { kind: "error", error: message(error) };
     }

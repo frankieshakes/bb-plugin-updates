@@ -24,6 +24,7 @@ export type ManualSteps = { kind: "manual"; reason: "secret-settings" | "self"; 
 export type OutOfRangeEntry = {
   run: number;
   id: string;
+  /** Re-read once it runs, in case a bb update job moved the plugin meanwhile. */
   from: string;
   to: string;
   state: "queued" | "waiting" | "running" | "done";
@@ -42,11 +43,15 @@ export type OutOfRangeRequest = ManualSteps | { kind: "entry"; entry: OutOfRange
  */
 export type UpdateRequest = { kind: "job"; job: UpdateJob } | { kind: "deferred"; id: string };
 
-/** How a deferred compatible update went; `skipped`: no compatible update left. */
+/**
+ * How a deferred compatible update went; `skipped`: no compatible update left.
+ * `ended`: the job it started finished (completed or failed), and was re-checked.
+ */
 export type DeferredUpdate = { id: string } & (
   | { outcome: "started"; jobId: string }
   | { outcome: "skipped" }
   | { outcome: "failed"; error: string }
+  | { outcome: "ended"; job: UpdateJob }
 );
 
 /** The last check's report; null before the first check. */

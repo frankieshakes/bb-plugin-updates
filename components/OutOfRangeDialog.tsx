@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { ManualSteps, OutOfRangeEntry, OutOfRangeRequest } from "../src/contract";
 import type { OutOfRangeItem } from "../src/report";
@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { toastManual } from "@/lib/toasts";
 import { errorText } from "@/lib/updates";
 
 /**
@@ -32,24 +33,39 @@ export function OutOfRangeDialog({
   onEnqueue: (id: string) => Promise<OutOfRangeRequest>;
   onClose: () => void;
 }) {
-  const [submitting, setSubmitting] = useState(false);
+  /** Plugins whose request is in flight; the dialog may have moved on to another. */
+  const [submitting, setSubmitting] = useState<ReadonlySet<string>>(new Set());
   const [result, setResult] = useState<ManualSteps | null>(null);
+  // A reply lands here only if its plugin is still the one shown.
+  const shown = useRef<string | null>(null);
   useEffect(() => {
     setResult(null);
+    shown.current = item?.id ?? null;
+    return () => {
+      shown.current = null;
+    };
   }, [item]);
   if (item === null) return null;
-  const pending = submitting || state !== undefined;
+  const pending = submitting.has(item.id) || state !== undefined;
 
   const confirm = async () => {
-    setSubmitting(true);
+    const { id } = item;
+    setSubmitting((ids) => new Set(ids).add(id));
     try {
-      const request = await onEnqueue(item.id);
-      if (request.kind === "manual") setResult(request);
+      const request = await onEnqueue(id);
+      if (shown.current !== id) {
+        // Closed or moved on meanwhile; toast manual steps rather than lose them.
+        if (request.kind === "manual") toastManual(id, request.command);
+      } else if (request.kind === "manual") setResult(request);
       else onClose();
     } catch (cause) {
       toast.error(errorText(cause));
     } finally {
-      setSubmitting(false);
+      setSubmitting((ids) => {
+        const next = new Set(ids);
+        next.delete(id);
+        return next;
+      });
     }
   };
 

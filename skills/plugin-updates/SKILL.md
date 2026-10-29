@@ -30,6 +30,9 @@ range. `bb plugin-updates` also finds newer git releases beyond the range
 - `--out-of-range` reinstalls the plugin: settings are restored, but its
   storage and schedules may reset. Confirm with the user first and show the
   compare link from `list`.
+- Only `bb plugin-updates update` waits for a pending `--out-of-range`
+  update. Don't update that plugin with bb's own plugin commands until it's
+  done; nothing holds those back mid-reinstall.
 - Plugins with secret settings, and this plugin itself, can't be moved out of
   range automatically. The command prints the manual steps instead; show them
   to the user rather than running them.

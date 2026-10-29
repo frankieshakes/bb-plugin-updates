@@ -694,6 +694,24 @@ describe("plugin-updates backend", () => {
       ).toEqual(["queued", "waiting", "running", "done"]);
     });
 
+    it("an out-of-range update that waited reports the version the bb job left, not the queued one", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      await rpc("update", { id: "a" });
+
+      const cli = harness.behavior.runCli(["update", "a", "--out-of-range"]);
+      await vi.waitFor(async () => expect(await states(rpc)).toEqual({ a: "waiting" }));
+      registry.installed.get("a")!.version = "0.7.5";
+      registry.finishUpdate("a");
+
+      expect(await cli).toMatchObject({ exitCode: 0, stdout: "Updated a 0.7.5 → 0.9.2." });
+      expect((await queue(rpc))[0]).toMatchObject({
+        from: "0.7.5",
+        result: { kind: "updated", from: "0.7.5", to: "0.9.2" },
+      });
+    });
+
     it("an out-of-range update gives up on a bb job that never ends, untouched, and the queue moves on", async () => {
       const registry = fakeRegistry({ a: both("a"), b: board("b") });
       const touched: string[] = [];
@@ -767,6 +785,37 @@ describe("plugin-updates backend", () => {
       await installs.release();
       await vi.waitFor(() => expect(registry.startedUpdates).toEqual(["a"]));
       expect(deferredSignals(harness)).toEqual([{ id: "a", outcome: "started", jobId: "job-a" }]);
+    });
+
+    it("re-checks once a deferred update's job ends, with no page open to", async () => {
+      const registry = fakeRegistry({ a: both("a") });
+      const installs = holdInstalls(registry);
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      await rpc("update_out_of_range", { id: "a" });
+      await rpc("update", { id: "a" });
+      await installs.release();
+      await vi.waitFor(() =>
+        expect(deferredSignals(harness)).toEqual([{ id: "a", outcome: "started", jobId: "job-a" }]),
+      );
+      const reportChanges = () =>
+        harness.inspection.realtimeSignals.filter((signal) => signal.channel === "report-changed").length;
+      const before = reportChanges();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(reportChanges()).toBe(before);
+
+      registry.installed.get("a")!.check = { outcome: "current" };
+      registry.finishUpdate("a");
+
+      await vi.waitFor(() =>
+        expect(deferredSignals(harness)).toEqual([
+          { id: "a", outcome: "started", jobId: "job-a" },
+          { id: "a", outcome: "ended", job: expect.objectContaining({ id: "job-a", state: "completed" }) },
+        ]),
+      );
+      expect(reportChanges()).toBe(before + 1);
+      const { report } = await rpc<{ report: RpcReport }>("report");
+      expect(report.compatible).toEqual([]);
     });
 
     it("a deferred compatible update is skipped once the plugin has none left", async () => {
