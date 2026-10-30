@@ -27,7 +27,12 @@ and installs the new release, keeping the range or pin style it was
 installed with. Its settings are restored afterwards; its stored data and
 schedules may reset. If the install fails, the old version is reinstalled.
 Plugins with secret settings, which can't be read back, get the commands to
-run by hand instead.
+run by hand instead. Confirmed updates run one at a time, in order, and keep
+going if you leave the page; a toast follows each one to the end. Updates
+started here never give a plugin both kinds at once: whichever was asked for
+second waits for the other. An out-of-range update gives up, changing nothing,
+if the other one hasn't finished after 10 minutes. An update started from bb
+itself while a reinstall is underway isn't held back.
 
 Checks run when bb starts and every 6 hours by default (1h, 6h, 24h, or
 off).
