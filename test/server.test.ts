@@ -553,7 +553,9 @@ describe("plugin-updates backend", () => {
       const listed = await harness.behavior.runCli(["list"]);
 
       expect(listed.stdout).toContain("  homepage (disabled)  ");
-      expect(listed.stdout).toContain("No plugins with updates.");
+      expect(listed.stdout).toContain(
+        "No enabled plugins with updates (1 disabled plugin has an update).",
+      );
     });
   });
 });
