@@ -10,7 +10,6 @@
 //   hooks/                         report, update-job, and rail-bubble state
 //   components/ui/                 vendored bb components
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
-import { RailAccessory } from "@/components/RailAccessory";
 import { UpdatesOverlay } from "@/components/UpdatesOverlay";
 import { UpdatesPage } from "@/components/UpdatesPage";
 import { PANEL_PATH, PANEL_TITLE } from "@/lib/updates";
@@ -22,7 +21,6 @@ export default definePluginApp((app) => {
     icon: "plugin-updates/update",
     path: PANEL_PATH,
     component: UpdatesPage,
-    experimental_sidebarAccessory: RailAccessory,
   });
   app.slots.experimental_appOverlay({ id: "rail-count-and-toasts", component: UpdatesOverlay });
 });

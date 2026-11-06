@@ -4,8 +4,7 @@ import { PANEL_TITLE } from "@/lib/updates";
 const BUBBLE_ATTR = "data-plugin-updates-count";
 
 /**
- * bb doesn't render `experimental_sidebarAccessory` on the icon-only nav rail
- * yet, so decorate our rail entry directly. It's found by bb's
+ * Decorates our entry on the icon-only nav rail directly. It's found by bb's
  * `data-nav-rail-item` wrapper and the button's label; if bb changes that
  * markup the bubble just doesn't show.
  */
