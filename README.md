@@ -4,10 +4,8 @@ A BB plugin (id `plugin-updates`) that surfaces plugin updates in the UI and
 applies them, including newer git releases that fall **outside** a plugin's
 installed semver range or pin, which `bb plugin outdated` never reports.
 
-- **Count bubble** on the Plugin Updates nav rail icon. bb doesn't render
-  `experimental_sidebarAccessory` on the rail yet, so the frontend decorates
-  bb's `[data-nav-rail-item]` entry directly (and registers the accessory for
-  when bb does).
+- **Count bubble** on the Plugin Updates nav rail icon. The frontend decorates
+  bb's `[data-nav-rail-item]` entry directly.
 - **Toast** once per newly found version (setting `toastOnNewUpdate`).
 - **Disabled plugins** keep their updates listed with a "Disabled" tag, but
   aren't counted, toasted (until re-enabled), or included in Update all.
@@ -64,7 +62,7 @@ installed semver range or pin, which `bb plugin outdated` never reports.
 
 ```
 server.ts              backend entry: wires settings, schedule, RPC, and CLI
-app.tsx                frontend entry: registers the page, overlay, and rail accessory
+app.tsx                frontend entry: registers the page and overlay
 
 src/                   backend + shared logic
   contract.ts          RPC contract and result types (frontend imports types only)
@@ -86,7 +84,6 @@ components/            frontend components
   sections/            compatible, out-of-range, notices, collapsed lists
   OutOfRangeDialog.tsx confirmation (queues the update) + manual steps
   UpdatesOverlay.tsx   headless: rail count bubble + toasts, incl. out-of-range progress
-  RailAccessory.tsx    native rail accessory (unused by bb today)
   list.tsx             Section, Collapsed, Row
   ui/                  vendored bb components
 hooks/                 useUpdates (report + realtime), useUpdateJobs (bb jobs),

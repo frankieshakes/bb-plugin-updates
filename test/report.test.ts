@@ -4,14 +4,14 @@ import { buildReport, type CheckEntry } from "../src/report";
 const homepageUpdate: CheckEntry = {
   id: "homepage",
   outcome: "update-available",
-  installed: { version: "7caaae1", display: "bb-homepage.git@v0.2.5 (7caaae1)" },
-  candidate: { version: "dbcb6f5", display: "bb-homepage.git@v0.2.7 (dbcb6f5)" },
+  installed: { version: "7caaae1", label: "0.2.5", display: "bb-homepage.git@v0.2.5 (7caaae1)" },
+  candidate: { version: "dbcb6f5", label: "0.2.7", display: "bb-homepage.git@v0.2.7 (dbcb6f5)" },
 };
 
 const agentBoardCurrent: CheckEntry = {
   id: "agent-board",
   outcome: "current",
-  installed: { version: "c4a6633", display: "bb-plugin-agent-board.git@v0.7.0 (c4a6633)" },
+  installed: { version: "c4a6633", label: "0.7.0", display: "bb-plugin-agent-board.git@v0.7.0 (c4a6633)" },
 };
 
 const agentBoardRelease = {
@@ -108,7 +108,7 @@ describe("buildReport", () => {
         {
           ...agentBoardCurrent,
           outcome: "update-available",
-          candidate: { version: "aaaa111", display: "bb-plugin-agent-board.git@v0.7.3 (aaaa111)" },
+          candidate: { version: "aaaa111", label: "0.7.3", display: "bb-plugin-agent-board.git@v0.7.3 (aaaa111)" },
         },
       ],
       releases: { "agent-board": agentBoardRelease },
@@ -126,7 +126,7 @@ describe("buildReport", () => {
       checks: [
         {
           ...agentBoardCurrent,
-          blocked: { version: "v0.7.5", reasons: ["requires bb >=0.60"] },
+          blocked: { version: "v0.7.5", label: "0.7.5", reasons: ["requires bb >=0.60"] },
         },
       ],
       releases: {},
@@ -135,7 +135,7 @@ describe("buildReport", () => {
     });
 
     expect(report.blocked).toEqual([
-      { id: "agent-board", version: "v0.7.5", reasons: ["requires bb >=0.60"] },
+      { id: "agent-board", version: "v0.7.5", label: "0.7.5", reasons: ["requires bb >=0.60"] },
     ]);
     expect(report.badgeCount).toBe(0);
     expect(report.newlySeen).toEqual([]);
@@ -149,12 +149,12 @@ describe("buildReport", () => {
         {
           id: "tasks",
           outcome: "pinned",
-          installed: { version: "0.1.0", display: "builtin:tasks" },
+          installed: { version: "0.1.0", label: "0.1.0", display: "builtin:tasks" },
         },
         {
           id: "gone",
           outcome: "unavailable",
-          installed: { version: "abc1234", display: "bb-plugin-gone.git@v1.0.0 (abc1234)" },
+          installed: { version: "abc1234", label: "1.0.0", display: "bb-plugin-gone.git@v1.0.0 (abc1234)" },
           detail: "repository not found",
         },
       ],
