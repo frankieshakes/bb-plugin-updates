@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { useRpc } from "@get-bb/plugin-sdk/app";
-import { toast } from "sonner";
+import { useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { DEFERRED_UPDATE } from "../src/channels";
 import type { UpdateJob, rpcContract } from "../src/contract";
+import { toastJobEnd } from "@/lib/toasts";
 
 const isActive = (job: UpdateJob) => job.state === "queued" || job.state === "running";
 
@@ -15,11 +16,7 @@ export function useUpdateJobs(onSettled: () => void) {
       for (const job of next) {
         const before = previous.find((p) => p.id === job.id);
         if (before === undefined || !isActive(before) || isActive(job)) continue;
-        if (job.state === "completed") {
-          if (job.result.outcome === "rolled-back") {
-            toast.error(`${job.pluginId} update rolled back. ${job.result.detail ?? ""}`);
-          } else toast.success(`Updated ${job.pluginId}`);
-        } else if (job.state === "failed") toast.error(`${job.pluginId}: ${job.error}`);
+        toastJobEnd(job);
         onSettled();
       }
       return next;
@@ -29,6 +26,10 @@ export function useUpdateJobs(onSettled: () => void) {
   useEffect(() => {
     poll().catch(() => undefined);
   }, [poll]);
+  // A deferred update's job is started by the server; fetching it starts the polling.
+  useRealtime(DEFERRED_UPDATE, () => {
+    poll().catch(() => undefined);
+  });
   const anyActive = jobs.some(isActive);
   useEffect(() => {
     if (!anyActive) return;
