@@ -4,8 +4,6 @@ import { toast } from "sonner";
 import { DEFERRED_UPDATE, NEW_UPDATES } from "../src/channels";
 import type { DeferredUpdate, OutOfRangeEntry } from "../src/contract";
 import { useOutOfRangeQueue } from "@/hooks/useOutOfRangeQueue";
-import { useRailBubble } from "@/hooks/useRailBubble";
-import { useUpdates } from "@/hooks/useUpdates";
 import { outOfRangeToastId, sticky, toastJobEnd, toastManual } from "@/lib/toasts";
 import { PANEL_PATH } from "@/lib/updates";
 
@@ -65,12 +63,10 @@ function toastDeferred(update: DeferredUpdate) {
   }
 }
 
-/** Headless: owns the rail bubble and the toasts for every app window. */
+/** Headless: owns the toasts for every app window. */
 export function UpdatesOverlay() {
-  const { snapshot } = useUpdates();
   const navigate = useBbNavigate();
   const open = useCallback(() => navigate.toPluginPanel(PANEL_PATH), [navigate]);
-  useRailBubble(snapshot?.report.badgeCount ?? 0);
   useOutOfRangeQueue(toastOutOfRange);
   useRealtime(DEFERRED_UPDATE, (payload) => {
     if (payload !== null) toastDeferred(payload as DeferredUpdate);

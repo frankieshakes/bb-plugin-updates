@@ -4,8 +4,9 @@ A BB plugin (id `plugin-updates`) that surfaces plugin updates in the UI and
 applies them, including newer git releases that fall **outside** a plugin's
 installed semver range or pin, which `bb plugin outdated` never reports.
 
-- **Count bubble** on the Plugin Updates nav rail icon. The frontend decorates
-  bb's `[data-nav-rail-item]` entry directly.
+- **Count badge** on the Plugin Updates nav entry, through bb's native
+  `experimental_useBadge`. bb draws it, including `9+`, and a dot on More while
+  the entry is hidden there.
 - **Toast** once per newly found version (setting `toastOnNewUpdate`).
 - **Disabled plugins** keep their updates listed with a "Disabled" tag, but
   aren't counted, toasted (until re-enabled), or included in Update all.
@@ -83,16 +84,17 @@ components/            frontend components
   UpdatesPage.tsx      the page; composes sections/ and the dialog
   sections/            compatible, out-of-range, notices, collapsed lists
   OutOfRangeDialog.tsx confirmation (queues the update) + manual steps
-  UpdatesOverlay.tsx   headless: rail count bubble + toasts, incl. out-of-range progress
+  UpdatesOverlay.tsx   headless: toasts, incl. out-of-range progress
   list.tsx             Section, Collapsed, Row
   ui/                  vendored bb components
 hooks/                 useUpdates (report + realtime), useUpdateJobs (bb jobs),
                        useOutOfRangeQueue (out-of-range queue + realtime),
-                       useRailBubble (nav rail decoration)
+                       useUpdatesBadge (nav badge)
 lib/updates.ts         frontend constants and helpers
 lib/toasts.ts          toasts shared by the overlay, page, and dialog
 
-test/                  vitest: releases, report (pure), server (fake bb host via RPC + CLI)
+test/                  vitest: releases, report (pure), server (fake bb host via RPC + CLI),
+                       app (nav badge + toasts through the SDK's frontend harness)
 skills/plugin-updates/ agent skill for the CLI
 icons/update.svg       nav + branding icon
 ```
