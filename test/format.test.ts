@@ -5,14 +5,14 @@ import { buildReport, type CheckEntry } from "../src/report";
 const update = (id: string): CheckEntry => ({
   id,
   outcome: "update-available",
-  installed: { version: "aaa", display: `${id}@v1 (aaa)` },
-  candidate: { version: "bbb", display: `${id}@v2 (bbb)` },
+  installed: { version: "aaa", label: "1", display: `${id}@v1 (aaa)` },
+  candidate: { version: "bbb", label: "2", display: `${id}@v2 (bbb)` },
 });
 
 const current = (id: string): CheckEntry => ({
   id,
   outcome: "current",
-  installed: { version: "aaa", display: `${id}@v1 (aaa)` },
+  installed: { version: "aaa", label: "1", display: `${id}@v1 (aaa)` },
 });
 
 const footer = (checks: CheckEntry[], disabled: string[] = []) =>
