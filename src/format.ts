@@ -31,10 +31,21 @@ export function formatReport(report: Report, checkedAt: number): string {
       report.releaseCheckFailures.map((f) => `${f.id}  ${f.error}`),
     ),
   ];
-  const count = report.badgeCount;
-  lines.push(
-    `${count === 0 ? "No" : count} plugin${count === 1 ? "" : "s"} with updates. ` +
-      `Checked ${new Date(checkedAt).toLocaleString()}.`,
-  );
+  lines.push(`${summary(report)} Checked ${new Date(checkedAt).toLocaleString()}.`);
   return lines.join("\n");
+}
+
+const plugins = (n: number) => `${n} plugin${n === 1 ? "" : "s"}`;
+
+// The badge count skips disabled plugins; say so rather than contradict the list.
+function summary(report: Report): string {
+  const count = report.badgeCount;
+  const disabled = new Set(
+    [...report.compatible, ...report.outOfRange].filter((i) => i.disabled).map((i) => i.id),
+  ).size;
+  if (disabled === 0) return `${count === 0 ? "No plugins" : plugins(count)} with updates.`;
+  if (count === 0) {
+    return `No enabled plugins with updates (${disabled === 1 ? "1 disabled plugin has an update" : `${disabled} disabled plugins have updates`}).`;
+  }
+  return `${plugins(count)} with updates, plus ${disabled} disabled.`;
 }
