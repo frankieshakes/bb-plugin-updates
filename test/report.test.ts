@@ -238,4 +238,52 @@ describe("buildReport", () => {
     expect(report.badgeCount).toBe(0);
     expect(report.newlySeen).toEqual([]);
   });
+
+  it("keeps release results for plugins bb couldn't check, in the order given, never as idle", () => {
+    const report = buildReport({
+      checks: [homepageUpdate],
+      releases: {
+        c: { kind: "failed", error: "Authentication failed" },
+        b: { kind: "blocked", version: "2.0.0", reasons: ["requires bb >=9"] },
+        "agent-board": { ...agentBoardRelease, blocked: { version: "1.0.0", reasons: ["requires bb >=9"] } },
+        off: { ...agentBoardRelease, from: "0.1.0" },
+      },
+      ignored: {},
+      seen: {},
+      disabled: ["off"],
+      unchecked: ["agent-board", "b", "c", "off"],
+    });
+
+    const { kind: _, ...offered } = agentBoardRelease;
+    expect(report.outOfRange).toEqual([
+      { id: "agent-board", ...offered, version: "0.9.2" },
+      { id: "off", ...offered, from: "0.1.0", version: "0.9.2", disabled: true },
+    ]);
+    expect(report.blocked).toEqual([
+      { id: "agent-board", version: "1.0.0", reasons: ["requires bb >=9"] },
+      { id: "b", version: "2.0.0", reasons: ["requires bb >=9"] },
+    ]);
+    expect(report.releaseCheckFailures).toEqual([{ id: "c", error: "Authentication failed" }]);
+    expect(report.upToDate).toEqual([]);
+    expect(report.other).toEqual([]);
+    expect(report.badgeCount).toBe(2);
+    expect(report.newlySeen).toEqual([
+      { id: "homepage", version: "dbcb6f5" },
+      { id: "agent-board", version: "0.9.2" },
+    ]);
+  });
+
+  it("ignores an unchecked plugin's ignored release like any other", () => {
+    const report = buildReport({
+      checks: [],
+      releases: { "agent-board": agentBoardRelease },
+      ignored: { "agent-board": ["0.9.2"] },
+      seen: {},
+      unchecked: ["agent-board"],
+    });
+
+    expect(report.outOfRange).toEqual([]);
+    expect(report.ignored).toMatchObject([{ id: "agent-board", kind: "out-of-range", to: "0.9.2" }]);
+    expect(report.badgeCount).toBe(0);
+  });
 });

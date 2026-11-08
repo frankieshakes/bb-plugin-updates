@@ -53,6 +53,7 @@ export function createUpdateService(
       ignored: await store.ignored(),
       seen: await store.seen(),
       disabled: installed.filter((p) => p.enabled === false).map((p) => p.id),
+      unchecked: last.updateCheckFailures?.map(({ id }) => id),
     });
     return {
       report,

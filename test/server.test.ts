@@ -1486,6 +1486,150 @@ describe("plugin-updates backend", () => {
         expect(listed.stdout).toContain(`Couldn't check for updates:\n  b  ${SSL}`);
         expect(listed.stdout).toContain("Couldn't check for newer releases:\n  a  ls-remote timed out");
       });
+
+      describe("for a plugin whose own update check failed", () => {
+        type Full = FallbackSnapshot & {
+          report: { upToDate: Array<{ id: string }>; other: Array<{ id: string }> };
+        };
+        /** Release ids neither up to date nor other: they have no update check entry. */
+        const expectNotIdle = (snapshot: Full, ids: string[]) => {
+          for (const id of ids) {
+            expect(snapshot.report.upToDate.map((i) => i.id)).not.toContain(id);
+            expect(snapshot.report.other.map((i) => i.id)).not.toContain(id);
+          }
+        };
+
+        it("still offers its newer release outside the range, and counts it", async () => {
+          vi.mocked(listRemoteTags).mockImplementation(async (url) => (url.includes("/b.git") ? tags : ""));
+          const registry = fakeRegistry({ homepage, b: board("b") });
+          failChecks(registry, ["b"]);
+          const { rpc } = await load(registry);
+
+          const snapshot = await rpc<Full>("check");
+
+          expect(snapshot.updateCheckFailures).toEqual([{ id: "b", error: SSL }]);
+          expect(snapshot.report.outOfRange).toEqual([
+            {
+              id: "b",
+              from: "0.7.0",
+              to: "0.9.2",
+              version: "0.9.2",
+              tag: "v0.9.2",
+              newSource: "git:https://github.com/a/b.git@semver:^0.9.2",
+              compareUrl: "https://github.com/a/b/compare/v0.7.0...v0.9.2",
+            },
+          ]);
+          expect(snapshot.report.badgeCount).toBe(2);
+          expectNotIdle(snapshot, ["b"]);
+          expect(await rpc<Full>("report")).toMatchObject({ report: { outOfRange: [{ id: "b" }], badgeCount: 2 } });
+        });
+
+        it("still lists its releases this bb can't run as blocked", async () => {
+          vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+            url.includes("/b.git") || url.includes("/c.git") ? tags : "",
+          );
+          vi.mocked(readPackageJsonAt).mockImplementation(async ({ url, tag }) =>
+            JSON.stringify({
+              engines: url.includes("/c.git") || tag === "v0.9.2" ? { bb: ">=0.47" } : { bb: ">=0.40" },
+            }),
+          );
+          const registry = fakeRegistry({ homepage, b: board("b"), c: board("c") });
+          failChecks(registry, ["b", "c"]);
+          const { rpc } = await load(registry, {}, { bbVersion: "0.46.1" });
+
+          const snapshot = await rpc<Full>("check");
+
+          expect(snapshot.updateCheckFailures).toEqual([
+            { id: "b", error: SSL },
+            { id: "c", error: SSL },
+          ]);
+          const reasons = ["requires bb >=0.47, running bb is 0.46.1"];
+          expect(snapshot.report.blocked).toEqual([
+            { id: "b", version: "0.9.2", reasons },
+            { id: "c", version: "0.9.2", reasons },
+          ]);
+          expect(snapshot.report.outOfRange).toMatchObject([{ id: "b", to: "0.8.0" }]);
+          expect(snapshot.report.badgeCount).toBe(2);
+          expectNotIdle(snapshot, ["b", "c"]);
+        });
+
+        it("still reports its failed release check", async () => {
+          vi.mocked(listRemoteTags).mockImplementation(async (url) => {
+            if (url.includes("/b.git")) throw new Error("ls-remote timed out");
+            return "";
+          });
+          const registry = fakeRegistry({ a: board("a"), b: board("b") });
+          failChecks(registry, ["b"]);
+          const { rpc } = await load(registry);
+
+          const snapshot = await rpc<Full>("check");
+
+          expect(snapshot.updateCheckFailures).toEqual([{ id: "b", error: SSL }]);
+          expect(snapshot.report.releaseCheckFailures).toEqual([{ id: "b", error: "ls-remote timed out" }]);
+          expect(snapshot.report.upToDate.map((i) => i.id)).toEqual(["a"]);
+          expectNotIdle(snapshot, ["b"]);
+        });
+
+        it("flags a disabled one's release without counting or announcing it", async () => {
+          vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+            url.includes("/b.git") || url.includes("/c.git") ? tags : "",
+          );
+          const registry = fakeRegistry({ homepage, b: { ...board("b"), enabled: false }, c: board("c") });
+          failChecks(registry, ["b", "c"]);
+          const { rpc, harness } = await load(registry);
+
+          const snapshot = await rpc<Full>("check");
+
+          expect(snapshot.report.outOfRange).toMatchObject([
+            { id: "b", to: "0.9.2", disabled: true },
+            { id: "c", to: "0.9.2" },
+          ]);
+          expect(snapshot.report.outOfRange[1]).not.toHaveProperty("disabled");
+          expect(snapshot.report.badgeCount).toBe(2);
+          const toasts = harness.inspection.realtimeSignals.filter((s) => s.channel === "new-updates");
+          expect(toasts.map((s) => s.payload)).toEqual([
+            { updates: [{ id: "homepage", version: "dbcb6f5" }, { id: "c", version: "0.9.2" }] },
+          ]);
+        });
+
+        it("bb plugin-updates list shows its release results beside the failure", async () => {
+          vi.mocked(listRemoteTags).mockImplementation(async (url) => {
+            if (url.includes("/d.git")) throw new Error("ls-remote timed out");
+            return url.includes("homepage") ? "" : tags;
+          });
+          vi.mocked(readPackageJsonAt).mockImplementation(async ({ tag }) =>
+            JSON.stringify({ engines: tag === "v0.9.2" ? { bb: ">=0.47" } : { bb: ">=0.40" } }),
+          );
+          const registry = fakeRegistry({
+            homepage,
+            b: board("b"),
+            c: { ...board("c"), enabled: false },
+            d: board("d"),
+          });
+          failChecks(registry, ["b", "c", "d"]);
+          const { harness } = await load(registry, {}, { bbVersion: "0.46.1" });
+          await harness.behavior.runCli(["check"]);
+
+          const listed = await harness.behavior.runCli(["list"]);
+
+          expect(listed.exitCode).toBe(0);
+          expect(listed.stdout).toContain(
+            `Couldn't check for updates:\n  b  ${SSL}\n  c  ${SSL}\n  d  ${SSL}\n`,
+          );
+          expect(listed.stdout).toContain(
+            "Newer releases outside the installed range:\n" +
+              "  b  0.7.0 → 0.8.0  https://github.com/a/b/compare/v0.7.0...v0.8.0\n" +
+              "  c (disabled)  0.7.0 → 0.8.0  https://github.com/a/c/compare/v0.7.0...v0.8.0\n",
+          );
+          expect(listed.stdout).toContain(
+            "Blocked by engine ranges:\n" +
+              "  b  0.9.2: requires bb >=0.47, running bb is 0.46.1\n" +
+              "  c  0.9.2: requires bb >=0.47, running bb is 0.46.1\n",
+          );
+          expect(listed.stdout).toContain("Couldn't check for newer releases:\n  d  ls-remote timed out");
+          expect(listed.stdout).toContain("2 plugins with updates, plus 1 disabled.");
+        });
+      });
     });
   });
 });
