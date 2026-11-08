@@ -25,7 +25,8 @@ export function NoticeSections({
       {report.blocked.length === 0 ? null : (
         <Section title="Blocked by engine ranges">
           {report.blocked.map((item) => (
-            <Row key={item.id} id={item.id}>
+            // One plugin can have two: bb's candidate and one outside the range.
+            <Row key={`${item.id}@${item.version}`} id={item.id}>
               {item.version}: {item.reasons.join("; ")}
             </Row>
           ))}

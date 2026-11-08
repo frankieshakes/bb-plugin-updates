@@ -27,6 +27,7 @@ describe("resolveNewerRelease", () => {
       kind: "out-of-range",
       from: "0.7.0",
       to: "0.9.2",
+      tag: "v0.9.2",
       newSource: "git:https://github.com/a/b.git@semver:^0.9.2",
       compareUrl: "https://github.com/a/b/compare/v0.7.0...v0.9.2",
     });
@@ -47,6 +48,7 @@ describe("resolveNewerRelease", () => {
       kind: "out-of-range",
       from: "0.1.0",
       to: "0.2.0",
+      tag: "v0.2.0",
       newSource: `git:https://github.com/a/b.git@${sha(2)}`,
       compareUrl: `https://github.com/a/b/compare/${pinned}...v0.2.0`,
     });
@@ -69,6 +71,7 @@ describe("resolveNewerRelease", () => {
       kind: "out-of-range",
       from: "0.7.0",
       to: "0.7.1",
+      tag: "v0.7.1",
       newSource: "git:https://github.com/a/b.git@v0.7.1",
       compareUrl: "https://github.com/a/b/compare/v0.7.0...v0.7.1",
     });
@@ -115,10 +118,37 @@ describe("resolveNewerRelease", () => {
       kind: "out-of-range",
       from: "0.3.4",
       to: "0.4.1",
+      tag: "taskboard/v0.4.1",
       newSource:
         "git:https://github.com/m/bb-plugins.git@semver:taskboard/:^0.4.1",
       compareUrl:
         "https://github.com/m/bb-plugins/compare/taskboard/v0.3.4...taskboard/v0.4.1",
+    });
+  });
+});
+
+describe("a major release beyond the range", () => {
+  const tags = lsRemote([
+    [sha(1), "v0.1.0"],
+    [sha(2), "v0.1.1"],
+    [sha(3), "v1.0.0"],
+  ]);
+
+  it.each([
+    "git:https://fixture.invalid/fx@semver:^0.1.0",
+    // bb records a bare range as typed, with the range alongside.
+    "git:https://fixture.invalid/fx@^0.1.0",
+  ])("offers v1.0.0 to %s, skipping the in-range v0.1.1", (requested) => {
+    const source = { requested, range: "^0.1.0", resolvedTag: "v0.1.0" };
+
+    expect(releaseCheckTarget(source)).toEqual({ kind: "git", url: "https://fixture.invalid/fx" });
+    expect(resolveNewerRelease({ source, installedVersion: "0.1.0", lsRemote: tags })).toEqual({
+      kind: "out-of-range",
+      from: "0.1.0",
+      to: "1.0.0",
+      tag: "v1.0.0",
+      newSource: "git:https://fixture.invalid/fx@semver:^1.0.0",
+      compareUrl: "https://fixture.invalid/fx/compare/v0.1.0...v1.0.0",
     });
   });
 });

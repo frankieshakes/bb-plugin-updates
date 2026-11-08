@@ -18,6 +18,7 @@ const agentBoardRelease = {
   kind: "out-of-range" as const,
   from: "0.7.0",
   to: "0.9.2",
+  tag: "v0.9.2",
   newSource: "git:https://github.com/a/bb-plugin-agent-board.git@semver:^0.9.2",
   compareUrl: "https://github.com/a/bb-plugin-agent-board/compare/v0.7.0...v0.9.2",
 };
@@ -93,6 +94,7 @@ describe("buildReport", () => {
         from: "0.7.0",
         to: "0.9.2",
         version: "0.9.2",
+        tag: "v0.9.2",
         newSource: "git:https://github.com/a/bb-plugin-agent-board.git@semver:^0.9.2",
         compareUrl:
           "https://github.com/a/bb-plugin-agent-board/compare/v0.7.0...v0.9.2",
@@ -139,6 +141,34 @@ describe("buildReport", () => {
     ]);
     expect(report.badgeCount).toBe(0);
     expect(report.newlySeen).toEqual([]);
+  });
+
+  it("lists releases outside the range that this bb can't run as blocked, beside bb's own", () => {
+    const reasons = ["requires bb >=0.47, running bb is 0.46.1"];
+    const report = buildReport({
+      checks: [
+        { ...agentBoardCurrent, blocked: { version: "v0.7.5", label: "0.7.5", reasons: ["requires bb >=0.60"] } },
+        { ...homepageUpdate, id: "notes" },
+      ],
+      releases: {
+        // Only a release it can't run: blocked, nothing offered.
+        "agent-board": { kind: "blocked", version: "0.9.2", reasons },
+        // An older one it can run is offered; the newer one is blocked.
+        notes: { ...agentBoardRelease, to: "0.8.0", blocked: { version: "0.9.2", reasons } },
+      },
+      ignored: {},
+      seen: {},
+    });
+
+    expect(report.blocked).toEqual([
+      { id: "agent-board", version: "v0.7.5", label: "0.7.5", reasons: ["requires bb >=0.60"] },
+      { id: "agent-board", version: "0.9.2", reasons },
+      { id: "notes", version: "0.9.2", reasons },
+    ]);
+    expect(report.outOfRange).toMatchObject([{ id: "notes", to: "0.8.0" }]);
+    expect(report.outOfRange[0]).not.toHaveProperty("blocked");
+    expect(report.upToDate.map(({ id }) => id)).toEqual(["agent-board"]);
+    expect(report.badgeCount).toBe(1);
   });
 
   it("files plugins with nothing to do under up to date or other", () => {
@@ -207,5 +237,53 @@ describe("buildReport", () => {
     expect(report.outOfRange).toMatchObject([{ id: "agent-board", disabled: true }]);
     expect(report.badgeCount).toBe(0);
     expect(report.newlySeen).toEqual([]);
+  });
+
+  it("keeps release results for plugins bb couldn't check, in the order given, never as idle", () => {
+    const report = buildReport({
+      checks: [homepageUpdate],
+      releases: {
+        c: { kind: "failed", error: "Authentication failed" },
+        b: { kind: "blocked", version: "2.0.0", reasons: ["requires bb >=9"] },
+        "agent-board": { ...agentBoardRelease, blocked: { version: "1.0.0", reasons: ["requires bb >=9"] } },
+        off: { ...agentBoardRelease, from: "0.1.0" },
+      },
+      ignored: {},
+      seen: {},
+      disabled: ["off"],
+      unchecked: ["agent-board", "b", "c", "off"],
+    });
+
+    const { kind: _, ...offered } = agentBoardRelease;
+    expect(report.outOfRange).toEqual([
+      { id: "agent-board", ...offered, version: "0.9.2" },
+      { id: "off", ...offered, from: "0.1.0", version: "0.9.2", disabled: true },
+    ]);
+    expect(report.blocked).toEqual([
+      { id: "agent-board", version: "1.0.0", reasons: ["requires bb >=9"] },
+      { id: "b", version: "2.0.0", reasons: ["requires bb >=9"] },
+    ]);
+    expect(report.releaseCheckFailures).toEqual([{ id: "c", error: "Authentication failed" }]);
+    expect(report.upToDate).toEqual([]);
+    expect(report.other).toEqual([]);
+    expect(report.badgeCount).toBe(2);
+    expect(report.newlySeen).toEqual([
+      { id: "homepage", version: "dbcb6f5" },
+      { id: "agent-board", version: "0.9.2" },
+    ]);
+  });
+
+  it("ignores an unchecked plugin's ignored release like any other", () => {
+    const report = buildReport({
+      checks: [],
+      releases: { "agent-board": agentBoardRelease },
+      ignored: { "agent-board": ["0.9.2"] },
+      seen: {},
+      unchecked: ["agent-board"],
+    });
+
+    expect(report.outOfRange).toEqual([]);
+    expect(report.ignored).toMatchObject([{ id: "agent-board", kind: "out-of-range", to: "0.9.2" }]);
+    expect(report.badgeCount).toBe(0);
   });
 });

@@ -25,6 +25,8 @@ export interface OutOfRangeItem {
   from: string;
   to: string;
   version: string;
+  /** The release's tag; missing from checks saved by older versions of this plugin. */
+  tag?: string;
   newSource: string;
   compareUrl: string;
 }
@@ -33,6 +35,7 @@ export type IgnoredItem =
   | (CompatibleItem & { kind: "compatible" })
   | (OutOfRangeItem & { kind: "out-of-range" });
 
+/** A newer release this bb can't run: bb's own candidate, or one outside the range. */
 export interface BlockedItem {
   id: string;
   version: string;
@@ -68,6 +71,8 @@ export function buildReport(input: {
   seen: Record<string, string[]>;
   /** Ids of installed plugins that are turned off. */
   disabled?: string[];
+  /** Ids bb couldn't check, so not in `checks`; their release results still count. */
+  unchecked?: string[];
 }): Report {
   const isIgnored = (id: string, version: string) =>
     (input.ignored[id] ?? []).includes(version);
@@ -81,6 +86,24 @@ export function buildReport(input: {
   const upToDate: IdleItem[] = [];
   const other: OtherItem[] = [];
   const releaseCheckFailures: Array<{ id: string; error: string }> = [];
+  // A release result carries its own `from` (the installed version), so it
+  // needs no update check entry.
+  const addRelease = (id: string) => {
+    const release = input.releases[id];
+    if (release?.kind === "failed") {
+      releaseCheckFailures.push({ id, error: release.error });
+    }
+    if (release?.kind === "blocked") {
+      blocked.push({ id, version: release.version, reasons: release.reasons });
+    }
+    if (release?.kind === "out-of-range") {
+      const { kind: _, blocked: newerBlocked, ...rest } = release;
+      if (newerBlocked !== undefined) blocked.push({ id, ...newerBlocked });
+      const item = { id, ...rest, version: release.to, ...flag(id) };
+      if (isIgnored(item.id, item.version)) ignored.push({ ...item, kind: "out-of-range" });
+      else outOfRange.push(item);
+    }
+  };
   for (const entry of input.checks) {
     const updatesBefore = compatible.length + outOfRange.length + ignored.length;
     if (entry.blocked !== undefined) blocked.push({ id: entry.id, ...entry.blocked });
@@ -95,16 +118,7 @@ export function buildReport(input: {
       if (isIgnored(item.id, item.version)) ignored.push({ ...item, kind: "compatible" });
       else compatible.push(item);
     }
-    const release = input.releases[entry.id];
-    if (release?.kind === "failed") {
-      releaseCheckFailures.push({ id: entry.id, error: release.error });
-    }
-    if (release?.kind === "out-of-range") {
-      const { kind: _, ...rest } = release;
-      const item = { id: entry.id, ...rest, version: release.to, ...flag(entry.id) };
-      if (isIgnored(item.id, item.version)) ignored.push({ ...item, kind: "out-of-range" });
-      else outOfRange.push(item);
-    }
+    addRelease(entry.id);
     if (compatible.length + outOfRange.length + ignored.length > updatesBefore) continue;
     const idle = { id: entry.id, installed: entry.installed.display };
     if (entry.outcome === "current") upToDate.push(idle);
@@ -116,6 +130,8 @@ export function buildReport(input: {
       });
     }
   }
+  // Not idle either way: bb couldn't say whether they're up to date.
+  for (const id of input.unchecked ?? []) addRelease(id);
   const actionable = [...compatible, ...outOfRange].filter(({ id }) => !off.has(id));
   return {
     compatible,
