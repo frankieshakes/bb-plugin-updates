@@ -13,16 +13,32 @@ installed semver range or pin, which `bb plugin outdated` never reports.
 - **Plugin Updates page** with these sections:
   - Compatible updates, with Update all
   - Newer releases outside the range, each behind a confirmation dialog
-  - Blocked by engine ranges
-  - Couldn't check (for updates, or for newer releases)
-  - A notice when the latest check failed, with when, why, and Retry; the
-    lists stay from the last good check
+  - Blocked by engine ranges: releases whose `engines.bb` this bb doesn't
+    meet, and releases bb refused to install for their engines (e.g.
+    `engines.bbPluginSdk`) when one was tried
+  - Couldn't check (for updates, or for newer releases); a plugin listed
+    there isn't also listed as up to date
+  - A notice when the latest check failed, with when, why (per plugin, if
+    every plugin's check failed), and Retry; the lists stay from the last
+    good check
   - Collapsed: Ignored, Up to date, and Pinned
 - **CLI**: `bb plugin-updates list | check | update <id> [--out-of-range] | update --all | ignore <id>`.
-- **Failed checks**: if bb's update check fails as a whole (one bad remote
-  does that), each plugin is checked on its own, 4 at a time, so the others
-  still save. If none can be checked, the check fails: the last good results
-  stay, and the page, `list`, and `check` (exit 1) say it failed.
+- **Failed checks**: bb reports a plugin whose own check errored (a git or
+  npm command failing or timing out, the registry unreachable) as
+  `unavailable` with the error; those are listed as couldn't check, not as
+  pinned or unavailable. A plugin whose check failed keeps the compatible
+  update or newer release the last check found, marked stale with when it
+  was last confirmed, and still counted. If bb's update check fails as a
+  whole, each plugin is checked on its own, 4 at a time, so the others still
+  save. If every plugin that can be checked fails, the check fails: the last
+  good results stay, and the page, `list`, and `check` (exit 1) say it
+  failed, listing each plugin's error. A plugin removed mid-check (an
+  out-of-range update reinstalls one) is left out of that check's results.
+- **Refused releases**: only `engines.bb` is checked up front (no API reports
+  bb's plugin SDK version). If bb refuses an out-of-range release for its
+  engines when it's tried, that release is listed as blocked with bb's
+  reason, uncounted, until bb's version changes, a newer release appears, or
+  the plugin's installed version changes.
 
 ## How updates are applied
 
@@ -84,6 +100,8 @@ src/                   backend + shared logic
   report.ts            page sections, badge count, ignore/disabled/toast rules (pure)
   format.ts            report → CLI text (pure)
   git.ts               `git ls-remote --tags` (no prompts, 15s timeout)
+  engines.ts           whether this bb meets a release's `engines.bb`
+  bb-errors.ts         recognizes bb's check errors and engine refusals
   errors.ts            error → message
 
 components/            frontend components
