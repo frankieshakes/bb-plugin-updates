@@ -633,6 +633,87 @@ describe("updates page", () => {
     expect(page.queryByRole("alert")).toBeNull();
   });
 
+  const nothing = { ...emptyReport, compatible: [], badgeCount: 0 };
+
+  it("says every plugin is up to date only when every check worked", async () => {
+    const page = await renderPage({ report: () => ({ report: nothing, checkedAt: Date.now() }) });
+
+    expect(await page.findByText("Every plugin is up to date.")).toBeTruthy();
+  });
+
+  it.each([
+    ["bb couldn't check one", { updateCheckFailures: [{ id: "agent-board", error: SSL }] }, "agent-board"],
+    [
+      "a release check failed",
+      { report: { ...nothing, releaseCheckFailures: [{ id: "agent-board", error: SSL }] } },
+      "agent-board",
+    ],
+  ])("doesn't say every plugin is up to date when %s", async (_, extra, id) => {
+    const page = await renderPage({ report: () => ({ report: nothing, checkedAt: Date.now(), ...extra }) });
+
+    expect(await page.findByText("No updates found, but 1 plugin couldn't be checked.")).toBeTruthy();
+    expect(page.queryByText("Every plugin is up to date.")).toBeNull();
+    expect(page.getByText(id)).toBeTruthy();
+  });
+
+  it("doesn't say every plugin is up to date when the last check failed", async () => {
+    const page = await renderPage({
+      report: () => ({ report: nothing, checkedAt: Date.now(), lastFailure: { at: Date.now(), error: SSL } }),
+    });
+
+    expect(await page.findByRole("alert")).toBeTruthy();
+    expect(page.queryByText("Every plugin is up to date.")).toBeNull();
+  });
+
+  it("lists each plugin's failure in the notice when every check failed", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: emptyReport,
+        checkedAt: Date.now() - HOUR,
+        lastFailure: {
+          at: Date.now(),
+          error: "every plugin's update check failed",
+          failures: [
+            { id: "agent-board", error: SSL },
+            { id: "notes", error: "git ls-remote failed (exit 128): Operation timed out" },
+          ],
+        },
+      }),
+    });
+
+    const alert = await page.findByRole("alert");
+    expect(alert.textContent).toContain("every plugin's update check failed");
+    expect(alert.textContent).toContain(`agent-board${SSL}`);
+    expect(alert.textContent).toContain("notesgit ls-remote failed (exit 128): Operation timed out");
+  });
+
+  it("marks an update carried from an earlier check with when it was last confirmed", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: {
+          ...emptyReport,
+          compatible: [{ ...emptyReport.compatible[0]!, stale: { confirmedAt: Date.now() - 3 * HOUR } }],
+          outOfRange: [
+            {
+              id: "agent-board",
+              from: "0.7.0",
+              to: "0.9.2",
+              version: "0.9.2",
+              newSource: "git:x",
+              compareUrl: "https://x",
+              stale: { confirmedAt: Date.now() - 2 * HOUR },
+            },
+          ],
+        },
+        checkedAt: Date.now(),
+        updateCheckFailures: [{ id: "homepage", error: SSL }],
+      }),
+    });
+
+    expect(await page.findByText("Stale: last confirmed 3h ago")).toBeTruthy();
+    expect(page.getByText("Stale: last confirmed 2h ago")).toBeTruthy();
+  });
+
   it("shows no failure state after a good check", async () => {
     const page = await renderPage({
       report: () => ({ report: emptyReport, checkedAt: Date.now() }),

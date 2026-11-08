@@ -3,6 +3,7 @@ import type { OutOfRangeItem } from "../../src/report";
 import { ExternalLink } from "@/components/ExternalLink";
 import { Row, Section } from "@/components/list";
 import { IgnoreButton } from "@/components/sections/IgnoreButton";
+import { StaleNote } from "@/components/sections/StaleNote";
 import { Button } from "@/components/ui/button";
 
 /** Newer releases bb can't reach in place; each update is confirmed first. */
@@ -49,6 +50,7 @@ export function OutOfRangeSection({
             }
           >
             {item.from} → {item.to} · <ExternalLink href={item.compareUrl}>changes</ExternalLink>
+            <StaleNote item={item} />
           </Row>
         );
       })}

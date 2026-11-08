@@ -1,6 +1,7 @@
 import type { CompatibleItem } from "../../src/report";
 import { Row, Section } from "@/components/list";
 import { IgnoreButton } from "@/components/sections/IgnoreButton";
+import { StaleNote } from "@/components/sections/StaleNote";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -56,6 +57,7 @@ export function CompatibleSection({
             }
           >
             {item.from} → {item.to}
+            <StaleNote item={item} />
           </Row>
         );
       })}

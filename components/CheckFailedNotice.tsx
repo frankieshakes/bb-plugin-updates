@@ -24,6 +24,17 @@ export function CheckFailedNotice({
         <div className="line-clamp-3 break-words text-xs text-muted-foreground" title={failure.error}>
           {failure.error}
         </div>
+        {failure.failures === undefined ? null : (
+          // Every plugin's own check failed; each says why.
+          <ul className="space-y-0.5 text-xs text-muted-foreground">
+            {failure.failures.map(({ id, error }) => (
+              <li key={id} className="line-clamp-2 break-words" title={error}>
+                <span className="font-medium text-foreground">{id}</span>
+                {error}
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="text-xs text-muted-foreground">
           Showing results from the check {relativeTime(checkedAt)}.
         </div>
