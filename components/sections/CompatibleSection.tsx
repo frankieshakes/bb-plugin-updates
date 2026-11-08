@@ -43,6 +43,7 @@ export function CompatibleSection({
             key={item.id}
             id={item.id}
             tag={item.disabled ? "Disabled" : undefined}
+            note={item.stale && <StaleNote stale={item.stale} />}
             actions={
               <>
                 <IgnoreButton onClick={() => onIgnore(item.id, item.version)} />
@@ -57,7 +58,6 @@ export function CompatibleSection({
             }
           >
             {item.from} → {item.to}
-            <StaleNote item={item} />
           </Row>
         );
       })}

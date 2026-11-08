@@ -717,6 +717,53 @@ describe("updates page", () => {
     expect(page.getByText("Stale: last confirmed 2h ago")).toBeTruthy();
   });
 
+  it("keeps the stale note out of the row's truncated line, so it stays visible", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: {
+          ...emptyReport,
+          compatible: [
+            {
+              ...emptyReport.compatible[0]!,
+              from: "0.1.0-a-very-long-prerelease-tag",
+              to: "0.2.0-an-even-longer-prerelease-tag",
+              stale: { confirmedAt: Date.now() - 3 * HOUR },
+            },
+          ],
+          outOfRange: [
+            {
+              id: "agent-board",
+              from: "0.7.0",
+              to: "0.9.2",
+              version: "0.9.2",
+              newSource: "git:x",
+              compareUrl: "https://x",
+              stale: { confirmedAt: Date.now() - 2 * HOUR },
+            },
+          ],
+        },
+        checkedAt: Date.now(),
+      }),
+    });
+
+    const clipping = /(^|\s)(truncate|line-clamp-\d+|overflow-hidden|overflow-x-hidden|text-ellipsis|whitespace-nowrap)(\s|$)/;
+    for (const text of ["Stale: last confirmed 3h ago", "Stale: last confirmed 2h ago"]) {
+      const note = await page.findByText(text);
+      const row = note.closest("li")!;
+      expect(row).toBeTruthy();
+      // Every element from the note up to its row, none of which may clip it.
+      for (let el: Element | null = note; el !== null && el !== row.parentElement; el = el.parentElement) {
+        expect(el.className, `${text} inside <${el.tagName.toLowerCase()} class="${el.className}">`).not.toMatch(
+          el === row || el.tagName === "UL" ? /(^|\s)(truncate|line-clamp-\d+)(\s|$)/ : clipping,
+        );
+      }
+      // Not part of the truncated "from → to" line.
+      const truncated = row.querySelector(".truncate")!;
+      expect(truncated.textContent).toContain("→");
+      expect(truncated.contains(note)).toBe(false);
+    }
+  });
+
   it("shows no failure state after a good check", async () => {
     const page = await renderPage({
       report: () => ({ report: emptyReport, checkedAt: Date.now() }),

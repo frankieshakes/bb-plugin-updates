@@ -29,6 +29,7 @@ export function OutOfRangeSection({
             key={item.id}
             id={item.id}
             tag={item.disabled ? "Disabled" : undefined}
+            note={item.stale && <StaleNote stale={item.stale} />}
             actions={
               <>
                 <IgnoreButton onClick={() => onIgnore(item.id, item.version)} />
@@ -50,7 +51,6 @@ export function OutOfRangeSection({
             }
           >
             {item.from} → {item.to} · <ExternalLink href={item.compareUrl}>changes</ExternalLink>
-            <StaleNote item={item} />
           </Row>
         );
       })}
