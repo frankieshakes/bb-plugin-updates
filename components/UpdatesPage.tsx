@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import type { OutOfRangeItem } from "../src/report";
+import { CheckFailedNotice } from "@/components/CheckFailedNotice";
 import { OutOfRangeDialog } from "@/components/OutOfRangeDialog";
 import { CollapsedLists } from "@/components/sections/CollapsedLists";
 import { CompatibleSection } from "@/components/sections/CompatibleSection";
@@ -67,6 +68,14 @@ export function UpdatesPage() {
             {checking ? "Checking…" : "Check now"}
           </Button>
         </div>
+        {snapshot?.lastFailure === undefined ? null : (
+          <CheckFailedNotice
+            failure={snapshot.lastFailure}
+            checkedAt={snapshot.checkedAt}
+            retrying={checking}
+            onRetry={checkNow}
+          />
+        )}
 
         {report === undefined ? null : (
           <>
@@ -92,7 +101,7 @@ export function UpdatesPage() {
               onUpdate={setConfirming}
               onIgnore={ignore}
             />
-            <NoticeSections report={report} />
+            <NoticeSections report={report} updateCheckFailures={snapshot?.updateCheckFailures} />
             <CollapsedLists report={report} onUnignore={unignore} />
           </>
         )}

@@ -7,6 +7,16 @@ export interface LastCheck {
   checks: CheckEntry[];
   releases: Record<string, ReleaseResult>;
   checkedAt: number;
+  /** Plugins bb's per-plugin fallback couldn't check (see `check()`); absent when none. */
+  updateCheckFailures?: PluginCheckFailure[];
+}
+
+export type PluginCheckFailure = { id: string; error: string };
+
+/** The latest check that failed outright; cleared by the next one that works. */
+export interface CheckFailure {
+  at: number;
+  error: string;
 }
 
 export type VersionsById = Record<string, string[]>;
@@ -16,6 +26,9 @@ export function createStore(kv: BbPluginApi["storage"]["kv"]) {
   return {
     lastCheck: async () => (await kv.get<LastCheck>("lastCheck")) ?? null,
     saveLastCheck: (last: LastCheck) => kv.set("lastCheck", last),
+    lastFailure: async () => (await kv.get<CheckFailure>("lastFailure")) ?? null,
+    saveLastFailure: (failure: CheckFailure) => kv.set("lastFailure", failure),
+    clearLastFailure: () => kv.delete("lastFailure"),
     /** Versions the user chose to hide. */
     ignored: () => versions("ignored"),
     saveIgnored: (ignored: VersionsById) => kv.set("ignored", ignored),

@@ -28,8 +28,15 @@ export default async function plugin(
   });
 
   if (checkCron !== undefined) {
+    // check() records the failure for the page and CLI. Rethrow too: bb shows
+    // a schedule's thrown error in `bb plugin list`, and catches it there.
     bb.background.schedule("check", checkCron, async () => {
-      await updates.check();
+      try {
+        await updates.check();
+      } catch (error) {
+        bb.log.warn(`scheduled check failed: ${message(error)}`);
+        throw error;
+      }
     });
     bb.background.service("check-on-load", {
       async start(signal) {

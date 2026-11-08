@@ -20,6 +20,11 @@ range. `bb plugin-updates` also finds newer git releases beyond the range
 | `bb plugin-updates update <id> --out-of-range` | Remove and reinstall at the newer release, restoring settings. Waits for the plugin's running bb update first; gives up, changing nothing, after 10 minutes. |
 | `bb plugin-updates ignore <id>` | Hide the plugin's pending versions until a newer one appears. |
 
+`check` exits 1 when the check fails, printing the last good results with a
+`Last check failed …` line; `--json` includes `lastFailure`. Plugins bb
+couldn't check are listed under `Couldn't check for updates`
+(`updateCheckFailures` in `--json`); that alone doesn't fail `check`.
+
 ## Rules
 
 - Updates for disabled plugins are listed as `<id> (disabled)` and skipped by
