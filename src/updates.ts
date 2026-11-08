@@ -7,9 +7,12 @@ import { listRemoteTags } from "./git";
 import { preflightOutOfRange, updateOutOfRange } from "./out-of-range";
 import { createOutOfRangeQueue } from "./out-of-range-queue";
 import { releaseCheckTarget, resolveNewerRelease } from "./releases";
-import { buildReport, type ReleaseResult, type Report } from "./report";
-import type { Store } from "./store";
-import { message } from "./errors";
+import { buildReport, type CheckEntry, type ReleaseResult, type Report } from "./report";
+import type { PluginCheckFailure, Store } from "./store";
+import { boundedMessage, message } from "./errors";
+
+/** How many per-plugin checks the fallback runs at once. */
+const FALLBACK_CONCURRENCY = 4;
 
 export function createUpdateService(
   bb: BbPluginApi,
@@ -31,7 +34,7 @@ export function createUpdateService(
   }
 
   async function currentReport(): Promise<ReportSnapshot> {
-    const last = await store.lastCheck();
+    const [last, lastFailure] = await Promise.all([store.lastCheck(), store.lastFailure()]);
     if (last === null) return null;
     // Read live, so turning a plugin on or off shows without a re-check.
     const { plugins: installed } = await plugins.list();
@@ -42,7 +45,12 @@ export function createUpdateService(
       seen: await store.seen(),
       disabled: installed.filter((p) => p.enabled === false).map((p) => p.id),
     });
-    return { report, checkedAt: last.checkedAt };
+    return {
+      report,
+      checkedAt: last.checkedAt,
+      ...(lastFailure === null ? {} : { lastFailure }),
+      ...(last.updateCheckFailures?.length ? { updateCheckFailures: last.updateCheckFailures } : {}),
+    };
   }
 
   async function publishReport() {
@@ -60,20 +68,74 @@ export function createUpdateService(
     if (options.toastOnNewUpdate) bb.realtime.publish(NEW_UPDATES, { updates: report.newlySeen });
   }
 
-  async function check() {
-    const [checks, { plugins: installed }] = await Promise.all([
-      plugins.checkUpdates(),
-      plugins.list(),
-    ]);
-    const releases: Record<string, ReleaseResult> = {};
-    await Promise.all(
-      installed
-        .filter((p) => !p.source.startsWith("builtin:"))
-        .map(async (p) => {
-          releases[p.id] = await checkRelease(p.id, p.version);
-        }),
+  /**
+   * bb's update check fails as a whole when one plugin's remote does, so on
+   * failure check each plugin on its own, a few at a time. Throws the bulk
+   * error if none of those work either.
+   */
+  async function checkUpdates(ids: string[]) {
+    let bulkError: unknown;
+    try {
+      return { checks: await plugins.checkUpdates(), failures: [] as PluginCheckFailure[] };
+    } catch (error) {
+      bulkError = error;
+    }
+    // In install order, like the bulk check.
+    const results: Array<{ checks: CheckEntry[] } | PluginCheckFailure> = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length) {
+        const i = next++;
+        const id = ids[i]!;
+        try {
+          results[i] = { checks: await plugins.checkUpdates({ pluginId: id }) };
+        } catch (error) {
+          results[i] = { id, error: boundedMessage(error) };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(FALLBACK_CONCURRENCY, ids.length) }, worker));
+    const failures = results.filter((r) => "error" in r);
+    if (failures.length === ids.length) throw bulkError;
+    bb.log.warn(
+      `update check failed, so checked each plugin; ${failures.length} of ${ids.length} failed: ${message(bulkError)}`,
     );
-    await store.saveLastCheck({ checks, releases, checkedAt: Date.now() });
+    return { checks: results.flatMap((r) => ("checks" in r ? r.checks : [])), failures };
+  }
+
+  /** Records the failure, so the page and CLI can say so; the last good check stays. */
+  async function recordFailure(error: unknown) {
+    try {
+      await store.saveLastFailure({ at: Date.now(), error: boundedMessage(error) });
+      await publishReport();
+    } catch (recordError) {
+      bb.log.warn(`recording a failed check failed: ${message(recordError)}`);
+    }
+  }
+
+  async function check() {
+    try {
+      const { plugins: installed } = await plugins.list();
+      const { checks, failures } = await checkUpdates(installed.map((p) => p.id));
+      const releases: Record<string, ReleaseResult> = {};
+      await Promise.all(
+        installed
+          .filter((p) => !p.source.startsWith("builtin:"))
+          .map(async (p) => {
+            releases[p.id] = await checkRelease(p.id, p.version);
+          }),
+      );
+      await store.saveLastCheck({
+        checks,
+        releases,
+        checkedAt: Date.now(),
+        ...(failures.length === 0 ? {} : { updateCheckFailures: failures }),
+      });
+    } catch (error) {
+      await recordFailure(error);
+      throw error;
+    }
+    await store.clearLastFailure();
     const current = await publishReport();
     if (current !== null) await announce(current.report);
     return current;

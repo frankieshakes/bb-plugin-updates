@@ -3,6 +3,7 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { Report } from "./report";
+import type { CheckFailure, PluginCheckFailure } from "./store";
 
 export type UpdateJob = Awaited<
   ReturnType<BbPluginApi["sdk"]["plugins"]["experimental_startUpdate"]>
@@ -54,8 +55,17 @@ export type DeferredUpdate = { id: string } & (
   | { outcome: "ended"; job: UpdateJob }
 );
 
-/** The last check's report; null before the first check. */
-export type ReportSnapshot = { report: Report; checkedAt: number } | null;
+/**
+ * The last good check's report; null before the first one. `lastFailure`: a
+ * later check failed, so the report is from `checkedAt`. `updateCheckFailures`:
+ * plugins bb couldn't check in the last good check. Both absent when unset.
+ */
+export type ReportSnapshot = {
+  report: Report;
+  checkedAt: number;
+  lastFailure?: CheckFailure;
+  updateCheckFailures?: PluginCheckFailure[];
+} | null;
 
 const versionRef = z.object({ id: z.string().min(1), version: z.string().min(1) });
 const pluginRef = z.object({ id: z.string().min(1) });

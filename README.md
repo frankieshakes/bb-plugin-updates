@@ -14,9 +14,15 @@ installed semver range or pin, which `bb plugin outdated` never reports.
   - Compatible updates, with Update all
   - Newer releases outside the range, each behind a confirmation dialog
   - Blocked by engine ranges
-  - Couldn't check
+  - Couldn't check (for updates, or for newer releases)
+  - A notice when the latest check failed, with when, why, and Retry; the
+    lists stay from the last good check
   - Collapsed: Ignored, Up to date, and Pinned
 - **CLI**: `bb plugin-updates list | check | update <id> [--out-of-range] | update --all | ignore <id>`.
+- **Failed checks**: if bb's update check fails as a whole (one bad remote
+  does that), each plugin is checked on its own, 4 at a time, so the others
+  still save. If none can be checked, the check fails: the last good results
+  stay, and the page, `list`, and `check` (exit 1) say it failed.
 
 ## How updates are applied
 
