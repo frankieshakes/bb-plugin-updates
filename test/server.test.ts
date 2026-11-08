@@ -1433,5 +1433,59 @@ describe("plugin-updates backend", () => {
         updateCheckFailures: [{ id: "agent-board", error: SSL }],
       });
     });
+
+    describe("with engines and the one-by-one fallback", () => {
+      type FallbackSnapshot = Snapshot & {
+        report: RpcReport & {
+          blocked: Array<{ id: string; version: string; reasons: string[] }>;
+          releaseCheckFailures: Array<{ id: string; error: string }>;
+        };
+      };
+      const tags = [
+        `${sha(1)}\trefs/tags/v0.7.0`,
+        `${sha(2)}\trefs/tags/v0.8.0`,
+        `${sha(3)}\trefs/tags/v0.9.2`,
+      ].join("\n");
+
+      it("still checks releases' engines for plugins checked one by one", async () => {
+        vi.mocked(listRemoteTags).mockImplementation(async (url) => (url.includes("/a.git") ? tags : ""));
+        vi.mocked(readPackageJsonAt).mockImplementation(async ({ tag }) =>
+          JSON.stringify({ engines: tag === "v0.9.2" ? { bb: ">=0.47" } : { bb: ">=0.40" } }),
+        );
+        const registry = fakeRegistry({ homepage, a: board("a"), b: board("b") });
+        failChecks(registry, ["b"]);
+        const { rpc } = await load(registry, {}, { bbVersion: "0.46.1" });
+
+        const snapshot = await rpc<FallbackSnapshot>("check");
+
+        expect(snapshot.updateCheckFailures).toEqual([{ id: "b", error: SSL }]);
+        expect(snapshot).not.toHaveProperty("lastFailure");
+        expect(snapshot.report.compatible.map(({ id }) => id)).toEqual(["homepage"]);
+        expect(snapshot.report.outOfRange).toMatchObject([{ id: "a", to: "0.8.0" }]);
+        expect(snapshot.report.blocked).toEqual([
+          { id: "a", version: "0.9.2", reasons: ["requires bb >=0.47, running bb is 0.46.1"] },
+        ]);
+        expect(snapshot.report.badgeCount).toBe(2);
+      });
+
+      it("shows one plugin's failed update check and another's failed release check", async () => {
+        vi.mocked(listRemoteTags).mockImplementation(async (url) => {
+          if (url.includes("/a.git")) throw new Error("ls-remote timed out");
+          return "";
+        });
+        const registry = fakeRegistry({ a: board("a"), b: board("b") });
+        failChecks(registry, ["b"]);
+        const { rpc, harness } = await load(registry);
+
+        const snapshot = await rpc<FallbackSnapshot>("check");
+
+        expect(snapshot.updateCheckFailures).toEqual([{ id: "b", error: SSL }]);
+        expect(snapshot.report.releaseCheckFailures).toEqual([{ id: "a", error: "ls-remote timed out" }]);
+        const listed = await harness.behavior.runCli(["list"]);
+        expect(listed.exitCode).toBe(0);
+        expect(listed.stdout).toContain(`Couldn't check for updates:\n  b  ${SSL}`);
+        expect(listed.stdout).toContain("Couldn't check for newer releases:\n  a  ls-remote timed out");
+      });
+    });
   });
 });
