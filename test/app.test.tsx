@@ -683,8 +683,11 @@ describe("updates page", () => {
 
     const alert = await page.findByRole("alert");
     expect(alert.textContent).toContain("every plugin's update check failed");
-    expect(alert.textContent).toContain(`agent-board${SSL}`);
-    expect(alert.textContent).toContain("notesgit ls-remote failed (exit 128): Operation timed out");
+    expect(alert.textContent).toContain(`agent-board: ${SSL}`);
+    expect(alert.textContent).toContain("notes: git ls-remote failed (exit 128): Operation timed out");
+    expect(alert.textContent).not.toContain("notesgit");
+    const items = Array.from(alert.querySelectorAll("li"), (li) => li.textContent);
+    expect(items).toEqual([`agent-board: ${SSL}`, "notes: git ls-remote failed (exit 128): Operation timed out"]);
   });
 
   it("marks an update carried from an earlier check with when it was last confirmed", async () => {

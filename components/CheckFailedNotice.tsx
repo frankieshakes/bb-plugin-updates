@@ -30,6 +30,7 @@ export function CheckFailedNotice({
             {failure.failures.map(({ id, error }) => (
               <li key={id} className="line-clamp-2 break-words" title={error}>
                 <span className="font-medium text-foreground">{id}</span>
+                {": "}
                 {error}
               </li>
             ))}
