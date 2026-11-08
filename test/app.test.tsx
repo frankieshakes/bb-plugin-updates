@@ -309,6 +309,41 @@ describe("out-of-range toasts", () => {
     expect(toasts()).toEqual([RUNNING]);
   });
 
+  it("announces a run first seen done after first load", async () => {
+    const { moveTo } = await renderQueue([]);
+    await moveTo([done({ kind: "rolled-back", error: "Bad tarball." })]);
+    const outcome = [
+      "error",
+      "Couldn't update p; it's back on 1.0.0. Bad tarball.",
+      { id: TOAST_ID },
+    ];
+    expect(toasts()).toEqual([outcome]);
+    await moveTo([done({ kind: "rolled-back", error: "Bad tarball." })]);
+    expect(toasts()).toEqual([outcome]);
+  });
+
+  it("announces only the new run when first load already had a done one", async () => {
+    const finished = done({ kind: "updated", from: "1.0.0", to: "2.0.0" });
+    const { moveTo } = await renderQueue([finished]);
+    await moveTo([finished, entry("done", { run: 2 })]);
+    expect(toasts()).toEqual([
+      [
+        "error",
+        expect.stringMatching(/^Updating p failed partway/),
+        { id: TOAST_ID, duration: Infinity },
+      ],
+    ]);
+  });
+
+  it("catches up on a run that started and ended while disconnected", async () => {
+    const { slot, setEntries } = await renderQueue([]);
+    await slot.behavior.setRealtimeConnectionState("reconnecting");
+    setEntries([done({ kind: "updated", from: "1.0.0", to: "2.0.0" })]);
+    await slot.behavior.setRealtimeConnectionState("connected");
+    await settle();
+    expect(toasts()).toEqual([["success", "Updated p to 2.0.0", { id: TOAST_ID }]]);
+  });
+
   it("ignores a slower answer from an older fetch", async () => {
     const answers: Array<(queue: { entries: OutOfRangeEntry[] }) => void> = [];
     const slot = await renderOverlay({
@@ -336,6 +371,111 @@ describe("out-of-range toasts", () => {
     await slot.behavior.setRealtimeConnectionState("connected");
     await settle();
     expect(toasts()).toEqual([RUNNING, ["success", "Updated p to 2.0.0", { id: TOAST_ID }]]);
+  });
+});
+
+describe("out-of-range toasts reusing one id", () => {
+  // `sonner` merges a reused id's options into the toast already shown, so
+  // replay what was raised into the real `sonner` and read back what it holds.
+  // Its store outlives each test, so each test uses its own plugin.
+  const real = vi.importActual<typeof import("sonner")>("sonner");
+  let replayed = 0;
+  afterEach(() => {
+    replayed = 0;
+  });
+  async function shown(id: string) {
+    const { toast: sonner } = await real;
+    const raised = toasts() as [string, string, object][];
+    for (const [kind, message, options] of raised.slice(replayed)) {
+      (kind === "plain" ? sonner : sonner[kind as "error"])(message, options);
+    }
+    replayed = raised.length;
+    return sonner.getToasts().find((t) => t.id === `out-of-range-${id}`) as
+      { duration?: number; action?: { onClick: () => Promise<void> } } | undefined;
+  }
+
+  /** Renders the overlay over plugin `id`'s queue, which the test moves. */
+  async function renderRuns(id: string) {
+    const run = (run: number, fields: Partial<OutOfRangeEntry> = {}): OutOfRangeEntry => ({
+      run,
+      id,
+      from: "1.0.0",
+      to: "2.0.0",
+      state: "running",
+      ...fields,
+    });
+    let entries = [run(1)];
+    const slot = await renderOverlay({
+      out_of_range_queue: () => ({ entries }),
+    });
+    await settle();
+    const moveTo = async (next: OutOfRangeEntry) => {
+      entries = [next];
+      await slot.behavior.emitRealtime(OUT_OF_RANGE_CHANGED, {
+        id,
+        state: "changed",
+      });
+      await settle();
+    };
+    return { run, moveTo };
+  }
+
+  const failed = (command: string) =>
+    ({
+      state: "done",
+      result: { kind: "failed", error: "Disk full.", command },
+    }) as const;
+
+  it.each<[string, Partial<OutOfRangeEntry>]>([
+    ["failed", failed("bb plugin install OLD")],
+    [
+      "manual",
+      {
+        state: "done",
+        result: { kind: "manual", reason: "self", command: "OLD" },
+      },
+    ],
+    ["timed-out", { state: "done", result: { kind: "timed-out" } }],
+    ["error", { state: "done", result: { kind: "error", error: "Socket closed." } }],
+  ])("lets a retry after %s auto-dismiss, with no stale action", async (kind, outcome) => {
+    const id = `retry-${kind}`;
+    const { run, moveTo } = await renderRuns(id);
+    await moveTo(run(1, outcome));
+    expect((await shown(id))?.duration).toBe(Infinity);
+    for (const state of ["queued", "waiting", "running"] as const) {
+      await moveTo(run(2, { state }));
+      const toast = await shown(id);
+      expect(toast?.duration).toBeUndefined();
+      expect(toast?.action).toBeUndefined();
+    }
+    await moveTo(
+      run(2, {
+        state: "done",
+        result: { kind: "updated", from: "1.0.0", to: "2.0.0" },
+      }),
+    );
+    const toast = await shown(id);
+    expect(toast?.duration).toBeUndefined();
+    expect(toast?.action).toBeUndefined();
+  });
+
+  it("makes a sticky outcome after a retry sticky again, with its own action", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const id = "retry-sticky-again";
+    const { run, moveTo } = await renderRuns(id);
+    await moveTo(run(1, failed("bb plugin install OLD")));
+    await moveTo(run(2));
+    await moveTo(run(2, { state: "done", result: { kind: "timed-out" } }));
+    let toast = await shown(id);
+    expect(toast?.duration).toBe(Infinity);
+    expect(toast?.action).toBeUndefined();
+    await moveTo(run(3));
+    await moveTo(run(3, failed("bb plugin install NEW")));
+    toast = await shown(id);
+    expect(toast?.duration).toBe(Infinity);
+    await toast!.action!.onClick();
+    expect(writeText).toHaveBeenCalledWith("bb plugin install NEW");
   });
 });
 

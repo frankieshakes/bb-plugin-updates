@@ -12,6 +12,12 @@ export const sticky = (id: string, command: string) => ({
   },
 });
 
+/**
+ * Options for a toast without an action, reusing `id`. `sonner` merges options
+ * into the toast already shown under an id, so this clears what `sticky` set.
+ */
+export const plain = (id: string, duration?: number) => ({ id, duration, action: undefined });
+
 /** One per plugin: its out-of-range update's progress, then outcome. */
 export const outOfRangeToastId = (id: string) => `out-of-range-${id}`;
 
