@@ -9,8 +9,6 @@ interface FakePlugin {
   source: string;
   enabled?: boolean;
   version: string;
-  /** The SDK its app bundle was built with; bb builds builtins' with its own. */
-  sdkVersion?: string;
   detail?: { range?: string; resolvedTag?: string; tagPrefix?: string; subdirectory?: string };
   check: { outcome: string; candidate?: { version: string; display: string } };
   settings?: {
@@ -66,9 +64,6 @@ function fakeRegistry(
           source: p.source,
           version: p.version,
           enabled: p.enabled ?? true,
-          ...(p.sdkVersion === undefined
-            ? {}
-            : { app: { hasApp: true, bundle: { sdkVersion: p.sdkVersion } } }),
         })),
       }),
       checkUpdates: async (args?: { pluginId?: string }) => {
@@ -1039,25 +1034,20 @@ describe("plugin-updates backend", () => {
       ]);
     });
 
-    it("checks the plugin SDK range against the SDK bb's builtins were built with", async () => {
+    it("ignores engines.bbPluginSdk: an SDK-only mismatch neither blocks nor refuses", async () => {
       vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
-      manifests({ "v0.9.2": { bb: ">=0.40", bbPluginSdk: ">=0.7.0" } });
-      const registry = fakeRegistry({
-        "agent-board": agentBoard,
-        tasks: { source: "builtin:tasks", version: "0.1.0", sdkVersion: "0.6.132", check: { outcome: "pinned" } },
-      });
+      // bb's own install refuses an SDK it doesn't satisfy; that's left to it.
+      manifests({ "v0.9.2": { bb: ">=0.40", bbPluginSdk: ">=99.0.0" } });
+      const registry = fakeRegistry({ "agent-board": agentBoard });
       const { rpc } = await load(registry, {}, { bbVersion: "0.47.2" });
 
       const { report } = await rpc<{ report: EngineReport }>("check");
+      const result = await updateOutOfRange(rpc, "agent-board");
 
-      expect(report.outOfRange).toEqual([]);
-      expect(report.blocked).toEqual([
-        {
-          id: "agent-board",
-          version: "0.9.2",
-          reasons: ["requires bb plugin SDK >=0.7.0, running SDK is 0.6.132"],
-        },
-      ]);
+      expect(report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.2" }]);
+      expect(report.blocked).toEqual([]);
+      expect(report.badgeCount).toBe(1);
+      expect(result).toEqual({ kind: "updated", from: "0.7.0", to: "0.9.2" });
     });
 
     it("offers a release whose package.json declares no engines", async () => {
