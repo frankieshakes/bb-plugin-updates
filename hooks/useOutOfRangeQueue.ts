@@ -6,12 +6,14 @@ import type { OutOfRangeEntry, rpcContract } from "../src/contract";
 /**
  * The server's out-of-range update queue, refetched whenever an entry moves.
  * `onChange` gets each entry this window saw arrive or change state; entries
- * already done on first load aren't reported.
+ * already done on its first load aren't reported, but one first seen done
+ * later (it ran between two fetches) is.
  */
 export function useOutOfRangeQueue(onChange?: (entry: OutOfRangeEntry) => void) {
   const rpc = useRpc<typeof rpcContract>();
   const [entries, setEntries] = useState<OutOfRangeEntry[]>([]);
   const seen = useRef(new Map<number, OutOfRangeEntry["state"]>());
+  const loaded = useRef(false);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   // Fetches can overlap; a slower, older answer must not roll state back.
@@ -23,10 +25,12 @@ export function useOutOfRangeQueue(onChange?: (entry: OutOfRangeEntry) => void) 
       ({ entries: next }) => {
         if (ticket < applied.current) return;
         applied.current = ticket;
+        const firstLoad = !loaded.current;
+        loaded.current = true;
         for (const entry of next) {
           const before = seen.current.get(entry.run);
           seen.current.set(entry.run, entry.state);
-          if (before === entry.state || (before === undefined && entry.state === "done")) continue;
+          if (before === entry.state || (firstLoad && entry.state === "done")) continue;
           onChangeRef.current?.(entry);
         }
         setEntries(next);

@@ -4,24 +4,24 @@ import { toast } from "sonner";
 import { DEFERRED_UPDATE, NEW_UPDATES } from "../src/channels";
 import type { DeferredUpdate, OutOfRangeEntry } from "../src/contract";
 import { useOutOfRangeQueue } from "@/hooks/useOutOfRangeQueue";
-import { outOfRangeToastId, sticky, toastJobEnd, toastManual } from "@/lib/toasts";
+import { outOfRangeToastId, plain, sticky, toastJobEnd, toastManual } from "@/lib/toasts";
 import { PANEL_PATH } from "@/lib/updates";
 
 /** One toast per plugin, moved through queued → (waiting →) running → its outcome. */
 function toastOutOfRange({ id, from, to, state, result }: OutOfRangeEntry) {
   const toastId = outOfRangeToastId(id);
-  if (state === "queued")
-    return toast.loading(`Waiting to update ${id} to ${to}…`, { id: toastId });
+  if (state === "queued") return toast.loading(`Waiting to update ${id} to ${to}…`, plain(toastId));
   if (state === "waiting")
-    return toast.loading(`Waiting for ${id}'s other update…`, { id: toastId });
-  if (state === "running") return toast.loading(`Updating ${id} to ${to}…`, { id: toastId });
+    return toast.loading(`Waiting for ${id}'s other update…`, plain(toastId));
+  if (state === "running") return toast.loading(`Updating ${id} to ${to}…`, plain(toastId));
   switch (result?.kind) {
     case "updated":
-      return toast.success(`Updated ${id} to ${to}`, { id: toastId });
+      return toast.success(`Updated ${id} to ${to}`, plain(toastId));
     case "rolled-back":
-      return toast.error(`Couldn't update ${id}; it's back on ${from}. ${result.error}`, {
-        id: toastId,
-      });
+      return toast.error(
+        `Couldn't update ${id}; it's back on ${from}. ${result.error}`,
+        plain(toastId),
+      );
     case "failed":
       return toast.error(
         `Updating ${id} and the rollback both failed, so it isn't installed. ${result.error} Reinstall with: ${result.command}`,
@@ -32,16 +32,13 @@ function toastOutOfRange({ id, from, to, state, result }: OutOfRangeEntry) {
     case "timed-out":
       return toast.error(
         `Gave up waiting for ${id}'s other update to finish; nothing was changed. Try again once it's done.`,
-        { id: toastId, duration: Infinity },
+        plain(toastId, Infinity),
       );
     case "error":
     case undefined:
       return toast.error(
         `Updating ${id} failed partway; check whether it's installed. ${result?.error ?? ""}`,
-        {
-          id: toastId,
-          duration: Infinity,
-        },
+        plain(toastId, Infinity),
       );
   }
 }
