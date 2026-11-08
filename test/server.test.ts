@@ -33,9 +33,15 @@ function fakeRegistry(
   const startedUpdates: string[] = [];
   const finishedUpdates = new Set<string>();
   const display = (p: FakePlugin) => `${p.source} (${p.version})`;
+  const checkCalls: Array<string | undefined> = [];
+  let checkFailure = (_pluginId?: string): Error | undefined => undefined;
   return {
     installed,
     startedUpdates,
+    /** Each checkUpdates call's pluginId (undefined: the bulk check). */
+    checkCalls,
+    /** Makes checkUpdates throw what `fail` returns for a call's pluginId. */
+    failCheck: (fail: typeof checkFailure) => (checkFailure = fail),
     /** Jobs run until finished here. */
     finishUpdate: (pluginId: string) => finishedUpdates.add(pluginId),
     plugins: {
@@ -65,12 +71,16 @@ function fakeRegistry(
             : { app: { hasApp: true, bundle: { sdkVersion: p.sdkVersion } } }),
         })),
       }),
-      checkUpdates: async () =>
-        [...installed].map(([id, p]) => ({
+      checkUpdates: async (args?: { pluginId?: string }) => {
+        checkCalls.push(args?.pluginId);
+        const failure = checkFailure(args?.pluginId);
+        if (failure !== undefined) throw failure;
+        return [...installed].filter(([id]) => args?.pluginId === undefined || id === args.pluginId).map(([id, p]) => ({
           id,
           installed: { version: p.version, display: display(p) },
           ...p.check,
-        })),
+        }));
+      },
       getSource: async ({ pluginId }: { pluginId: string }) => {
         const p = installed.get(pluginId)!;
         return { requested: p.source, resolved: display(p), engines: {}, history: [], ...p.detail };
@@ -1194,6 +1204,234 @@ describe("plugin-updates backend", () => {
         "Newer releases outside the installed range:\n  fx  0.1.0 → 1.0.0  https://fixture.invalid/fx/compare/v0.1.0...v1.0.0",
       );
       expect(listed.stdout).toContain("1 plugin with updates.");
+    });
+  });
+
+  describe("failed checks", () => {
+    type Failure = { at: number; error: string };
+    type Snapshot = {
+      report: RpcReport;
+      checkedAt: number;
+      lastFailure?: Failure;
+      updateCheckFailures?: Array<{ id: string; error: string }>;
+    };
+    const SSL =
+      "HTTP 422: git ls-remote failed (exit 128): fatal: unable to access 'https://github.com/a/bb-plugin-agent-board.git/': SSL certificate problem: self signed certificate";
+
+    /** Makes bb's update check throw: the bulk call always, a per-plugin one for `ids` (all if omitted). */
+    function failChecks(registry: ReturnType<typeof fakeRegistry>, ids?: string[]) {
+      registry.failCheck((id) =>
+        id === undefined || ids === undefined || ids.includes(id) ? new Error(SSL) : undefined,
+      );
+      return { restore: () => registry.failCheck(() => undefined) };
+    }
+
+    const reportSignals = (harness: Awaited<ReturnType<typeof load>>["harness"]) =>
+      harness.inspection.realtimeSignals.filter((s) => s.channel === "report-changed");
+
+    it("keeps the last good report, records the failure, and tells open pages", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { rpc, harness } = await load(registry);
+      const good = await rpc<Snapshot>("check");
+      failChecks(registry);
+
+      await expect(rpc("check")).rejects.toThrow("SSL certificate problem");
+
+      const after = await rpc<Snapshot>("report");
+      expect(after.checkedAt).toBe(good.checkedAt);
+      expect(after.report.badgeCount).toBe(1);
+      expect(after.lastFailure).toEqual({ at: expect.any(Number), error: SSL });
+      expect(after.lastFailure!.at).toBeGreaterThanOrEqual(good.checkedAt);
+      expect(reportSignals(harness)).toHaveLength(2);
+    });
+
+    it("bounds a long failure message", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { rpc } = await load(registry);
+      await rpc("check");
+      registry.failCheck(() => new Error("x".repeat(5000)));
+
+      await expect(rpc("check")).rejects.toThrow();
+
+      const { lastFailure } = await rpc<Snapshot>("report");
+      expect(lastFailure!.error.length).toBeLessThanOrEqual(500);
+      expect(lastFailure!.error.endsWith("…")).toBe(true);
+    });
+
+    it("clears the failure on the next successful check", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { rpc } = await load(registry);
+      await rpc("check");
+      const failing = failChecks(registry);
+      await expect(rpc("check")).rejects.toThrow();
+      failing.restore();
+
+      await rpc("check");
+
+      const snapshot = await rpc<Snapshot>("report");
+      expect(snapshot).not.toHaveProperty("lastFailure");
+      expect(snapshot).not.toHaveProperty("updateCheckFailures");
+    });
+
+    it("leaves the snapshot's shape alone when nothing failed", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const { rpc } = await load(fakeRegistry({ homepage }));
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(Object.keys(snapshot).sort()).toEqual(["checkedAt", "report"]);
+    });
+
+    it("a scheduled check logs and records the failure, and still fails for bb's status line", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      failChecks(registry);
+
+      await expect(harness.behavior.runSchedule("check")).rejects.toThrow("SSL certificate problem");
+
+      expect(harness.inspection.logEntries).toContainEqual({
+        level: "warn",
+        message: `scheduled check failed: ${SSL}`,
+      });
+      expect((await rpc<Snapshot>("report")).lastFailure?.error).toBe(SSL);
+    });
+
+    it("a check on load logs and records the failure without crashing the service", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { rpc, harness } = await load(registry);
+      await rpc("check");
+      failChecks(registry);
+
+      const service = harness.behavior.runService("check-on-load");
+      await vi.waitFor(async () =>
+        expect((await rpc<Snapshot>("report")).lastFailure?.error).toBe(SSL),
+      );
+      service.controller.abort();
+      await service.done;
+
+      expect(harness.inspection.logEntries).toContainEqual({
+        level: "warn",
+        message: `check on load failed: ${SSL}`,
+      });
+    });
+
+    it("when bb's bulk check fails, checks plugins one by one and saves the rest", async () => {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("agent-board") ? agentBoardTags : "",
+      );
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard });
+      failChecks(registry, ["agent-board"]);
+      const { rpc, harness } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(registry.checkCalls.sort()).toEqual(["agent-board", "homepage", undefined].sort());
+      expect(snapshot.report.compatible.map(({ id }) => id)).toEqual(["homepage"]);
+      expect(snapshot.updateCheckFailures).toEqual([{ id: "agent-board", error: SSL }]);
+      expect(snapshot).not.toHaveProperty("lastFailure");
+      expect(await rpc<Snapshot>("report")).toMatchObject({
+        updateCheckFailures: [{ id: "agent-board", error: SSL }],
+      });
+      expect(harness.inspection.logEntries).toContainEqual({
+        level: "warn",
+        message: `update check failed, so checked each plugin; 1 of 2 failed: ${SSL}`,
+      });
+    });
+
+    it("the one-by-one fallback runs at most 4 checks at once", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const many = Object.fromEntries(
+        Array.from({ length: 10 }, (_, i) => [`p${i}`, { ...homepage, source: `git:https://github.com/y/p${i}.git` }]),
+      );
+      const registry = fakeRegistry(many);
+      const checkUpdates = registry.plugins.checkUpdates;
+      let running = 0;
+      let peak = 0;
+      registry.plugins.checkUpdates = async (args?: { pluginId?: string }) => {
+        if (args?.pluginId === undefined) throw new Error(SSL);
+        running++;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running--;
+        return checkUpdates(args);
+      };
+      const { rpc } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.compatible).toHaveLength(10);
+      expect(peak).toBe(4);
+    });
+
+    it("counts the check as failed when every plugin's own check fails too", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { rpc } = await load(registry);
+      await rpc("check");
+      failChecks(registry);
+
+      await expect(rpc("check")).rejects.toThrow(SSL);
+
+      expect(await rpc<Snapshot>("report")).toMatchObject({
+        report: { badgeCount: 1 },
+        lastFailure: { error: SSL },
+      });
+    });
+
+    it("bb plugin-updates check exits 1 and shows the failure with the old results", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      const { harness } = await load(registry);
+      await harness.behavior.runCli(["check"]);
+      failChecks(registry);
+
+      const checked = await harness.behavior.runCli(["check"]);
+      const listed = await harness.behavior.runCli(["list"]);
+      const json = await harness.behavior.runCli(["check", "--json"]);
+
+      expect(checked.exitCode).toBe(1);
+      expect(checked.stderr).toBe(`Check failed: ${SSL}`);
+      expect(checked.stdout).toContain("Compatible updates:\n  homepage");
+      expect(checked.stdout).toMatch(/\nLast check failed .+: HTTP 422: .+\. Showing results from .+\.$/);
+      expect(listed.exitCode).toBe(0);
+      expect(listed.stdout).toBe(checked.stdout);
+      expect(json.exitCode).toBe(1);
+      expect(JSON.parse(json.stdout)).toMatchObject({ lastFailure: { error: SSL } });
+      expect(JSON.parse((await harness.behavior.runCli(["list", "--json"])).stdout)).toMatchObject({
+        lastFailure: { error: SSL },
+      });
+    });
+
+    it("bb plugin-updates check exits 1 before any check has worked", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage });
+      failChecks(registry);
+      const { harness } = await load(registry);
+
+      const checked = await harness.behavior.runCli(["check"]);
+
+      expect(checked).toMatchObject({ exitCode: 1, stderr: `Check failed: ${SSL}` });
+    });
+
+    it("bb plugin-updates lists plugins bb couldn't check", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue("");
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard });
+      failChecks(registry, ["agent-board"]);
+      const { harness } = await load(registry);
+
+      const checked = await harness.behavior.runCli(["check"]);
+
+      expect(checked.exitCode).toBe(0);
+      expect(checked.stdout).toContain(`Couldn't check for updates:\n  agent-board  ${SSL}`);
+      expect(JSON.parse((await harness.behavior.runCli(["list", "--json"])).stdout)).toMatchObject({
+        updateCheckFailures: [{ id: "agent-board", error: SSL }],
+      });
     });
   });
 });

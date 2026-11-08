@@ -418,3 +418,88 @@ describe("deferred update toasts", () => {
     expect(toasts()).toEqual([["plain", "Started updating p"]]);
   });
 });
+
+describe("updates page", () => {
+  const HOUR = 60 * 60_000;
+  const emptyReport = {
+    compatible: [{ id: "homepage", from: "0.2.5", to: "0.2.7", version: "abc" }],
+    outOfRange: [],
+    blocked: [],
+    ignored: [],
+    upToDate: [],
+    other: [],
+    releaseCheckFailures: [],
+    badgeCount: 1,
+    newlySeen: [],
+  };
+  const SSL = "HTTP 422: git ls-remote failed (exit 128): SSL certificate problem";
+
+  async function renderPage(rpc: Record<string, () => unknown>) {
+    const app = await loadPluginApp(() => import("../app"));
+    return renderSlot(app.navPanels[0]!, { subPath: "" } as never, {
+      rpc: { jobs: () => ({ jobs: [] }), out_of_range_queue: () => ({ entries: [] }), ...rpc },
+    });
+  }
+
+  it("shows that the last check failed, when, why, and that the counts are older", async () => {
+    const now = Date.now();
+    const page = await renderPage({
+      report: () => ({
+        report: emptyReport,
+        checkedAt: now - 3 * HOUR,
+        lastFailure: { at: now - 5 * 60_000, error: SSL },
+      }),
+    });
+
+    const alert = await page.findByRole("alert");
+    expect(alert.textContent).toContain("Last check failed 5m ago.");
+    expect(alert.textContent).toContain(SSL);
+    expect(alert.textContent).toContain("Showing results from the check 3h ago.");
+    expect(page.getByText("Last checked 3h ago.")).toBeTruthy();
+    expect(page.getByText("homepage")).toBeTruthy();
+  });
+
+  it("retries through Check now, and drops the failure once a check works", async () => {
+    const now = Date.now();
+    const check = vi.fn(() => ({ report: emptyReport, checkedAt: Date.now() }));
+    const page = await renderPage({
+      report: () => ({
+        report: emptyReport,
+        checkedAt: now - HOUR,
+        lastFailure: { at: now, error: SSL },
+      }),
+      check,
+    });
+
+    const retry = await page.findByRole("button", { name: "Retry" });
+    await act(async () => retry.click());
+
+    await waitFor(() => expect(page.queryByRole("alert")).toBeNull());
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(page.getByText("Last checked just now.")).toBeTruthy();
+  });
+
+  it("lists plugins bb couldn't check", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: emptyReport,
+        checkedAt: Date.now(),
+        updateCheckFailures: [{ id: "agent-board", error: SSL }],
+      }),
+    });
+
+    expect(await page.findByText("Couldn't check for updates")).toBeTruthy();
+    expect(page.getByText("agent-board")).toBeTruthy();
+    expect(page.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows no failure state after a good check", async () => {
+    const page = await renderPage({
+      report: () => ({ report: emptyReport, checkedAt: Date.now() }),
+    });
+
+    expect(await page.findByText("Last checked just now.")).toBeTruthy();
+    expect(page.queryByRole("alert")).toBeNull();
+    expect(page.queryByText("Couldn't check for updates")).toBeNull();
+  });
+});

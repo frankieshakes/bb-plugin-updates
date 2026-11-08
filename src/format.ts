@@ -1,4 +1,5 @@
 // Plain-text rendering of a report for `bb plugin-updates`.
+import type { ReportSnapshot } from "./contract";
 import type { Report } from "./report";
 
 const name = (item: { id: string; disabled?: true }) =>
@@ -8,8 +9,18 @@ function section(title: string, lines: string[]): string[] {
   return lines.length === 0 ? [] : [`${title}:`, ...lines.map((line) => `  ${line}`), ""];
 }
 
-export function formatReport(report: Report, checkedAt: number): string {
+const at = (time: number) => new Date(time).toLocaleString();
+
+export function formatReport(
+  report: Report,
+  checkedAt: number,
+  { lastFailure, updateCheckFailures = [] }: Omit<NonNullable<ReportSnapshot>, "report" | "checkedAt"> = {},
+): string {
   const lines = [
+    ...section(
+      "Couldn't check for updates",
+      updateCheckFailures.map((f) => `${f.id}  ${f.error}`),
+    ),
     ...section(
       "Compatible updates",
       report.compatible.map((i) => `${name(i)}  ${i.from} → ${i.to}`),
@@ -31,7 +42,12 @@ export function formatReport(report: Report, checkedAt: number): string {
       report.releaseCheckFailures.map((f) => `${f.id}  ${f.error}`),
     ),
   ];
-  lines.push(`${summary(report)} Checked ${new Date(checkedAt).toLocaleString()}.`);
+  lines.push(`${summary(report)} Checked ${at(checkedAt)}.`);
+  if (lastFailure !== undefined) {
+    lines.push(
+      `Last check failed ${at(lastFailure.at)}: ${lastFailure.error.replace(/\.$/, "")}. Showing results from ${at(checkedAt)}.`,
+    );
+  }
   return lines.join("\n");
 }
 

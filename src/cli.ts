@@ -1,6 +1,7 @@
 // The `bb plugin-updates` command.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { OutOfRangeEntry, ReportSnapshot } from "./contract";
+import { message } from "./errors";
 import { formatReport } from "./format";
 import type { UpdateService } from "./updates";
 
@@ -126,8 +127,21 @@ export function registerCli(bb: BbPluginApi, updates: UpdateService) {
           ? JSON.stringify(current)
           : current === null
             ? 'Not checked yet. Run "bb plugin-updates check".'
-            : formatReport(current.report, current.checkedAt),
+            : formatReport(current.report, current.checkedAt, current),
       });
+      // A failed check exits 1, still showing the last good results (and the failure).
+      const check = async () => {
+        try {
+          return show(await updates.check());
+        } catch (error) {
+          const current = await updates.currentReport();
+          return {
+            ...(current === null && !json ? {} : show(current)),
+            exitCode: 1,
+            stderr: `Check failed: ${message(error)}`,
+          };
+        }
+      };
       switch (command) {
         case undefined:
         case "help":
@@ -137,7 +151,7 @@ export function registerCli(bb: BbPluginApi, updates: UpdateService) {
           return show(await updates.currentReport());
         case "check":
           if (argv.includes("--reannounce")) await updates.forgetAnnounced();
-          return show(await updates.check());
+          return check();
         case "update":
           if (argv.includes("--all") && args.length === 0) return updateAll();
           if (args.length !== 1) break;
