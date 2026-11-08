@@ -3,10 +3,11 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { DEFERRED_UPDATE, NEW_UPDATES, OUT_OF_RANGE_CHANGED, REPORT_CHANGED } from "./channels";
 import type { DeferredUpdate, ReportSnapshot, UpdateJob, UpdateRequest } from "./contract";
+import { cachedHostVersions, releaseProblems } from "./engines";
 import { listRemoteTags } from "./git";
 import { preflightOutOfRange, updateOutOfRange } from "./out-of-range";
 import { createOutOfRangeQueue } from "./out-of-range-queue";
-import { releaseCheckTarget, resolveNewerRelease } from "./releases";
+import { newerReleases, releaseCheckTarget, selectRunnableRelease } from "./releases";
 import { buildReport, type ReleaseResult, type Report } from "./report";
 import type { Store } from "./store";
 import { message } from "./errors";
@@ -17,6 +18,7 @@ export function createUpdateService(
   options: { toastOnNewUpdate: boolean; jobPollMs: number; jobWaitTimeoutMs: number },
 ) {
   const { plugins } = bb.sdk;
+  const hostVersions = cachedHostVersions(bb);
 
   async function checkRelease(id: string, version: string): Promise<ReleaseResult> {
     const source = await plugins.getSource({ pluginId: id });
@@ -24,7 +26,14 @@ export function createUpdateService(
     if (target.kind === "skip") return { kind: "none" };
     try {
       const lsRemote = await listRemoteTags(target.url);
-      return resolveNewerRelease({ source, installedVersion: version, lsRemote });
+      const releases = newerReleases({ source, installedVersion: version, lsRemote });
+      if (releases.length === 0) return { kind: "none" };
+      const host = await hostVersions();
+      const { subdirectory } = source;
+      // Skips releases this bb would refuse to install, as bb's own check does.
+      return await selectRunnableRelease(releases, ({ tag }) =>
+        releaseProblems({ url: target.url, tag, ...(subdirectory === undefined ? {} : { subdirectory }) }, host),
+      );
     } catch (error) {
       return { kind: "failed", error: message(error) };
     }

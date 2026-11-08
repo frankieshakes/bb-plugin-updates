@@ -1,14 +1,16 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listRemoteTags } from "../src/git";
+import { listRemoteTags, readPackageJsonAt } from "../src/git";
 import plugin from "../server";
 
-vi.mock("../src/git", () => ({ listRemoteTags: vi.fn() }));
+vi.mock("../src/git", () => ({ listRemoteTags: vi.fn(), readPackageJsonAt: vi.fn() }));
 
 interface FakePlugin {
   source: string;
   enabled?: boolean;
   version: string;
+  /** The SDK its app bundle was built with; bb builds builtins' with its own. */
+  sdkVersion?: string;
   detail?: { range?: string; resolvedTag?: string; tagPrefix?: string; subdirectory?: string };
   check: { outcome: string; candidate?: { version: string; display: string } };
   settings?: {
@@ -58,6 +60,9 @@ function fakeRegistry(
           source: p.source,
           version: p.version,
           enabled: p.enabled ?? true,
+          ...(p.sdkVersion === undefined
+            ? {}
+            : { app: { hasApp: true, bundle: { sdkVersion: p.sdkVersion } } }),
         })),
       }),
       checkUpdates: async () =>
@@ -125,15 +130,32 @@ type RpcReport = {
   badgeCount: number;
 };
 
+/** bb's version, as `bb.sdk.system.version()` reports it. */
+const runningBb = (currentVersion: string) => ({
+  version: async () => ({
+    currentVersion,
+    currentCommit: null,
+    installKind: "desktop",
+    isDevelopment: false,
+    latestVersion: null,
+    source: "npm",
+    updateAvailable: false,
+    upgradeCommand: "",
+  }),
+});
+
 async function load(
   registry: ReturnType<typeof fakeRegistry>,
   settings = {},
-  { jobWaitTimeoutMs = 60_000 } = {},
+  { jobWaitTimeoutMs = 60_000, bbVersion = undefined as string | undefined } = {},
 ) {
   const host = createFakePluginHost({
     pluginId: "plugin-updates",
     settings,
-    sdk: { plugins: registry.plugins },
+    sdk: {
+      plugins: registry.plugins,
+      ...(bbVersion === undefined ? {} : { system: runningBb(bbVersion) }),
+    },
   });
   await plugin(host.bb, { jobPollMs: 10, jobWaitTimeoutMs });
   const rpc = async <T>(method: string, input: unknown = null) =>
@@ -206,6 +228,8 @@ const agentBoardWithSettings: FakePlugin = {
 describe("plugin-updates backend", () => {
   beforeEach(() => {
     vi.mocked(listRemoteTags).mockReset();
+    vi.mocked(readPackageJsonAt).mockReset();
+    vi.mocked(readPackageJsonAt).mockResolvedValue("{}");
   });
 
   it("check reports compatible updates from bb and newer releases from git", async () => {
@@ -951,6 +975,225 @@ describe("plugin-updates backend", () => {
       expect(listed.stdout).toContain(
         "No enabled plugins with updates (1 disabled plugin has an update).",
       );
+    });
+  });
+  describe("engines of releases outside the range", () => {
+    type Engines = { bb?: string; bbPluginSdk?: string };
+    /** Each tag's package.json engines; an Error makes reading that tag fail. */
+    const manifests = (byTag: Record<string, Engines | Error>) =>
+      vi.mocked(readPackageJsonAt).mockImplementation(async ({ tag }) => {
+        const engines = byTag[tag] ?? {};
+        if (engines instanceof Error) throw engines;
+        return JSON.stringify({ name: "x", version: tag.slice(1), engines });
+      });
+    const boardTags = [
+      `${sha(1)}\trefs/tags/v0.7.0`,
+      `${sha(2)}\trefs/tags/v0.8.0`,
+      `${sha(3)}\trefs/tags/v0.9.2`,
+    ].join("\n");
+    type EngineReport = RpcReport & {
+      blocked: Array<{ id: string; version: string; reasons: string[] }>;
+      releaseCheckFailures: Array<{ id: string; error: string }>;
+    };
+
+    it("reports the newest release as blocked, not offered, when this bb can't run it", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      manifests({ "v0.9.2": { bb: ">=0.47" } });
+      const { rpc } = await load(fakeRegistry({ "agent-board": agentBoard }), {}, { bbVersion: "0.46.1" });
+
+      const { report } = await rpc<{ report: EngineReport }>("check");
+
+      expect(report.outOfRange).toEqual([]);
+      expect(report.blocked).toEqual([
+        { id: "agent-board", version: "0.9.2", reasons: ["requires bb >=0.47, running bb is 0.46.1"] },
+      ]);
+      expect(report.badgeCount).toBe(0);
+    });
+
+    it("falls back to the newest older release outside the range that this bb runs", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(boardTags);
+      manifests({ "v0.9.2": { bb: ">=0.47" }, "v0.8.0": { bb: ">=0.40" } });
+      const { rpc } = await load(fakeRegistry({ "agent-board": agentBoard }), {}, { bbVersion: "0.46.1" });
+
+      const { report } = await rpc<{ report: EngineReport }>("check");
+
+      expect(report.outOfRange).toMatchObject([
+        { id: "agent-board", to: "0.8.0", newSource: "git:https://github.com/a/bb-plugin-agent-board.git@semver:^0.8.0" },
+      ]);
+      expect(report.blocked).toMatchObject([{ id: "agent-board", version: "0.9.2" }]);
+      expect(report.badgeCount).toBe(1);
+      // Newest first, stopping at the first one this bb runs.
+      expect(vi.mocked(readPackageJsonAt).mock.calls.map(([args]) => args)).toEqual([
+        { url: "https://github.com/a/bb-plugin-agent-board.git", tag: "v0.9.2" },
+        { url: "https://github.com/a/bb-plugin-agent-board.git", tag: "v0.8.0" },
+      ]);
+    });
+
+    it("checks the plugin SDK range against the SDK bb's builtins were built with", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      manifests({ "v0.9.2": { bb: ">=0.40", bbPluginSdk: ">=0.7.0" } });
+      const registry = fakeRegistry({
+        "agent-board": agentBoard,
+        tasks: { source: "builtin:tasks", version: "0.1.0", sdkVersion: "0.6.132", check: { outcome: "pinned" } },
+      });
+      const { rpc } = await load(registry, {}, { bbVersion: "0.47.2" });
+
+      const { report } = await rpc<{ report: EngineReport }>("check");
+
+      expect(report.outOfRange).toEqual([]);
+      expect(report.blocked).toEqual([
+        {
+          id: "agent-board",
+          version: "0.9.2",
+          reasons: ["requires bb plugin SDK >=0.7.0, running SDK is 0.6.132"],
+        },
+      ]);
+    });
+
+    it("offers a release whose package.json declares no engines", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      manifests({});
+      const { rpc } = await load(fakeRegistry({ "agent-board": agentBoard }), {}, { bbVersion: "0.46.1" });
+
+      const { report } = await rpc<{ report: EngineReport }>("check");
+
+      expect(report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.2" }]);
+      expect(report.blocked).toEqual([]);
+      expect(report.badgeCount).toBe(1);
+    });
+
+    it("reads a multi-plugin repository's manifest from the plugin's tag and subdirectory", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(
+        `${sha(1)}\trefs/tags/taskboard/v0.3.4\n${sha(2)}\trefs/tags/taskboard/v0.4.1\n${sha(3)}\trefs/tags/v9.0.0`,
+      );
+      const registry = fakeRegistry({
+        taskboard: {
+          source: "git:https://github.com/m/bb-plugins.git@semver:taskboard/:^0.3.3",
+          version: "0.3.4",
+          detail: {
+            range: "^0.3.3",
+            tagPrefix: "taskboard/",
+            resolvedTag: "taskboard/v0.3.4",
+            subdirectory: "plugins/taskboard",
+          },
+          check: { outcome: "current" },
+        },
+      });
+      const { rpc } = await load(registry);
+
+      const { report } = await rpc<{ report: EngineReport }>("check");
+
+      expect(report.outOfRange).toMatchObject([{ id: "taskboard", to: "0.4.1" }]);
+      expect(readPackageJsonAt).toHaveBeenCalledWith({
+        url: "https://github.com/m/bb-plugins.git",
+        tag: "taskboard/v0.4.1",
+        subdirectory: "plugins/taskboard",
+      });
+    });
+
+    it("a manifest that can't be read fails only that plugin's release check", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      vi.mocked(readPackageJsonAt).mockImplementation(async ({ url }) => {
+        if (url.includes("/b.git")) throw new Error("fetch timed out");
+        return "{}";
+      });
+      const { rpc } = await load(fakeRegistry({ a: board("a"), b: board("b") }));
+
+      const { report } = await rpc<{ report: EngineReport }>("check");
+
+      expect(report.outOfRange.map(({ id }) => id)).toEqual(["a"]);
+      expect(report.releaseCheckFailures).toEqual([
+        { id: "b", error: "couldn't read v0.9.2's package.json: fetch timed out" },
+      ]);
+      expect(report.badgeCount).toBe(1);
+    });
+
+    it("refuses up front to move to a release this bb can't run", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      manifests({});
+      const registry = fakeRegistry({ "agent-board": agentBoard });
+      const { rpc } = await load(registry, {}, { bbVersion: "0.46.1" });
+      await rpc("check");
+      // The release changed since the check, say, or bb was downgraded.
+      manifests({ "v0.9.2": { bb: ">=0.47" } });
+
+      await expect(rpc("update_out_of_range", { id: "agent-board" })).rejects.toThrow(
+        "Can't update agent-board to 0.9.2: requires bb >=0.47, running bb is 0.46.1",
+      );
+      expect(registry.installed.get("agent-board")?.source).toBe(agentBoard.source);
+      expect(await queue(rpc)).toEqual([]);
+    });
+
+    it("refuses a queued move whose release this bb can no longer run, untouched", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      let reads = 0;
+      vi.mocked(readPackageJsonAt).mockImplementation(async () =>
+        // Fine for the check and the preflight; not once it runs.
+        JSON.stringify({ engines: ++reads > 2 ? { bb: ">=0.47" } : {} }),
+      );
+      const registry = fakeRegistry({ "agent-board": agentBoardWithSettings });
+      const remove = vi.spyOn(registry.plugins, "remove");
+      const { rpc } = await load(registry, {}, { bbVersion: "0.46.1" });
+      await rpc("check");
+
+      const result = await updateOutOfRange(rpc, "agent-board");
+
+      expect(result).toEqual({
+        kind: "rolled-back",
+        error: "Can't update agent-board to 0.9.2: requires bb >=0.47, running bb is 0.46.1",
+      });
+      expect(remove).not.toHaveBeenCalled();
+      expect(registry.installed.get("agent-board")).toMatchObject({
+        source: agentBoard.source,
+        settings: { values: { theme: "dark" } },
+      });
+    });
+  });
+
+  describe("a major release beyond a compatible update", () => {
+    // The shape from an isolated run: fx@^0.1.0 on 0.1.0, tags v0.1.0, v0.1.1 and v1.0.0.
+    const fxTags = [
+      `${sha(1)}\trefs/tags/v0.1.0`,
+      `${sha(2)}\trefs/tags/v0.1.1`,
+      `${sha(3)}\trefs/tags/v1.0.0`,
+    ].join("\n");
+    const fx = (requested: string): FakePlugin => ({
+      source: requested,
+      version: "0.1.0",
+      detail: { range: "^0.1.0", resolvedTag: "v0.1.0" },
+      check: {
+        outcome: "update-available",
+        candidate: { version: sha(2), display: "https://fixture.invalid/fx@v0.1.1" },
+      },
+    });
+
+    it.each([
+      ["semver:^0.1.0", "git:https://fixture.invalid/fx@semver:^0.1.0"],
+      ["a bare ^0.1.0", "git:https://fixture.invalid/fx@^0.1.0"],
+    ])("lists v0.1.1 as compatible and v1.0.0 as out of range, counted once (%s)", async (_, requested) => {
+      vi.mocked(listRemoteTags).mockResolvedValue(fxTags);
+      const { rpc, harness } = await load(fakeRegistry({ fx: fx(requested) }));
+
+      const { report } = await rpc<{ report: RpcReport & { releaseCheckFailures: unknown[] } }>("check");
+      const listed = await harness.behavior.runCli(["list"]);
+
+      expect(report.compatible).toMatchObject([{ id: "fx", version: sha(2) }]);
+      expect(report.outOfRange).toMatchObject([
+        {
+          id: "fx",
+          from: "0.1.0",
+          to: "1.0.0",
+          newSource: "git:https://fixture.invalid/fx@semver:^1.0.0",
+          compareUrl: "https://fixture.invalid/fx/compare/v0.1.0...v1.0.0",
+        },
+      ]);
+      expect(report.releaseCheckFailures).toEqual([]);
+      expect(report.badgeCount).toBe(1);
+      expect(listed.stdout).toContain("Compatible updates:\n  fx  ");
+      expect(listed.stdout).toContain(
+        "Newer releases outside the installed range:\n  fx  0.1.0 → 1.0.0  https://fixture.invalid/fx/compare/v0.1.0...v1.0.0",
+      );
+      expect(listed.stdout).toContain("1 plugin with updates.");
     });
   });
 });

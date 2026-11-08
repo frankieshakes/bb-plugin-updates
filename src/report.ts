@@ -25,6 +25,8 @@ export interface OutOfRangeItem {
   from: string;
   to: string;
   version: string;
+  /** The release's tag; missing from checks saved by older versions of this plugin. */
+  tag?: string;
   newSource: string;
   compareUrl: string;
 }
@@ -33,6 +35,7 @@ export type IgnoredItem =
   | (CompatibleItem & { kind: "compatible" })
   | (OutOfRangeItem & { kind: "out-of-range" });
 
+/** A newer release this bb can't run: bb's own candidate, or one outside the range. */
 export interface BlockedItem {
   id: string;
   version: string;
@@ -99,8 +102,12 @@ export function buildReport(input: {
     if (release?.kind === "failed") {
       releaseCheckFailures.push({ id: entry.id, error: release.error });
     }
+    if (release?.kind === "blocked") {
+      blocked.push({ id: entry.id, version: release.version, reasons: release.reasons });
+    }
     if (release?.kind === "out-of-range") {
-      const { kind: _, ...rest } = release;
+      const { kind: _, blocked: newerBlocked, ...rest } = release;
+      if (newerBlocked !== undefined) blocked.push({ id: entry.id, ...newerBlocked });
       const item = { id: entry.id, ...rest, version: release.to, ...flag(entry.id) };
       if (isIgnored(item.id, item.version)) ignored.push({ ...item, kind: "out-of-range" });
       else outOfRange.push(item);
