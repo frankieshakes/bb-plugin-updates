@@ -52,6 +52,10 @@ export function UpdatesPage() {
     }, fail);
 
   const report = snapshot?.report;
+  // Plugins whose update or release check failed; none of them is known to be up to date.
+  const unchecked = new Set(
+    [...(snapshot?.updateCheckFailures ?? []), ...(report?.releaseCheckFailures ?? [])].map(({ id }) => id),
+  ).size;
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto box-border w-full max-w-3xl space-y-6 px-4 pb-4 pt-3 md:px-5 md:pt-4">
@@ -79,12 +83,15 @@ export function UpdatesPage() {
 
         {report === undefined ? null : (
           <>
-            {report.compatible.length + report.outOfRange.length === 0 ? (
+            {/* After a failed check the notice says it all; these results are older. */}
+            {report.compatible.length + report.outOfRange.length === 0 && snapshot?.lastFailure === undefined ? (
               <div
                 role="status"
                 className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground"
               >
-                Every plugin is up to date.
+                {unchecked === 0
+                  ? "Every plugin is up to date."
+                  : `No updates found, but ${unchecked} plugin${unchecked === 1 ? "" : "s"} couldn't be checked.`}
               </div>
             ) : null}
             <CompatibleSection

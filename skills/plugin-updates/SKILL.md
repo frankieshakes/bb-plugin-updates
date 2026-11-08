@@ -21,9 +21,17 @@ range. `bb plugin-updates` also finds newer git releases beyond the range
 | `bb plugin-updates ignore <id>` | Hide the plugin's pending versions until a newer one appears. |
 
 `check` exits 1 when the check fails, printing the last good results with a
-`Last check failed …` line; `--json` includes `lastFailure`. Plugins bb
-couldn't check are listed under `Couldn't check for updates`
-(`updateCheckFailures` in `--json`); that alone doesn't fail `check`.
+`Last check failed …` line; `--json` includes `lastFailure`. When every
+plugin's own check failed (e.g. no network), each plugin's error follows that
+line (`lastFailure.failures`). Plugins bb couldn't check are listed under
+`Couldn't check for updates` (`updateCheckFailures` in `--json`); that alone
+doesn't fail `check`. Their updates from the last check stay listed, marked
+`(stale: last confirmed …)` (`stale.confirmedAt` in `--json`): tell the user
+they may be out of date.
+
+A release bb refused to install for its engines (e.g. `engines.bbPluginSdk`)
+is listed under `Blocked by engine ranges` with bb's reason from then on, until
+bb or the plugin changes version or a newer release appears.
 
 ## Rules
 

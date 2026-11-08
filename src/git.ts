@@ -5,27 +5,31 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 
-function git(args: string[], cwd?: string): Promise<string> {
+const TIMEOUT_MS = 15_000;
+
+function git(args: string[], cwd?: string, timeoutMs = TIMEOUT_MS): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       "git",
       args,
       {
         cwd,
-        timeout: 15_000,
+        timeout: timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
         env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       },
       (error, stdout, stderr) => {
         if (error === null) resolve(stdout);
+        // Killed by the timeout; its message would only say "Command failed".
+        else if (error.killed && error.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") reject(new Error(`git ${args.join(" ")} timed out after ${timeoutMs / 1000}s`));
         else reject(new Error(stderr.trim() || error.message));
       },
     );
   });
 }
 
-export function listRemoteTags(url: string): Promise<string> {
-  return git(["ls-remote", "--tags", url]);
+export function listRemoteTags(url: string, { timeoutMs = TIMEOUT_MS } = {}): Promise<string> {
+  return git(["ls-remote", "--tags", url], undefined, timeoutMs);
 }
 
 /**

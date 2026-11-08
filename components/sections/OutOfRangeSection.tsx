@@ -3,6 +3,7 @@ import type { OutOfRangeItem } from "../../src/report";
 import { ExternalLink } from "@/components/ExternalLink";
 import { Row, Section } from "@/components/list";
 import { IgnoreButton } from "@/components/sections/IgnoreButton";
+import { StaleNote } from "@/components/sections/StaleNote";
 import { Button } from "@/components/ui/button";
 
 /** Newer releases bb can't reach in place; each update is confirmed first. */
@@ -28,6 +29,7 @@ export function OutOfRangeSection({
             key={item.id}
             id={item.id}
             tag={item.disabled ? "Disabled" : undefined}
+            note={item.stale && <StaleNote stale={item.stale} />}
             actions={
               <>
                 <IgnoreButton onClick={() => onIgnore(item.id, item.version)} />

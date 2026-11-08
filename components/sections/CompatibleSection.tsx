@@ -1,6 +1,7 @@
 import type { CompatibleItem } from "../../src/report";
 import { Row, Section } from "@/components/list";
 import { IgnoreButton } from "@/components/sections/IgnoreButton";
+import { StaleNote } from "@/components/sections/StaleNote";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -42,6 +43,7 @@ export function CompatibleSection({
             key={item.id}
             id={item.id}
             tag={item.disabled ? "Disabled" : undefined}
+            note={item.stale && <StaleNote stale={item.stale} />}
             actions={
               <>
                 <IgnoreButton onClick={() => onIgnore(item.id, item.version)} />

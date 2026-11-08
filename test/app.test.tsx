@@ -633,6 +633,137 @@ describe("updates page", () => {
     expect(page.queryByRole("alert")).toBeNull();
   });
 
+  const nothing = { ...emptyReport, compatible: [], badgeCount: 0 };
+
+  it("says every plugin is up to date only when every check worked", async () => {
+    const page = await renderPage({ report: () => ({ report: nothing, checkedAt: Date.now() }) });
+
+    expect(await page.findByText("Every plugin is up to date.")).toBeTruthy();
+  });
+
+  it.each([
+    ["bb couldn't check one", { updateCheckFailures: [{ id: "agent-board", error: SSL }] }, "agent-board"],
+    [
+      "a release check failed",
+      { report: { ...nothing, releaseCheckFailures: [{ id: "agent-board", error: SSL }] } },
+      "agent-board",
+    ],
+  ])("doesn't say every plugin is up to date when %s", async (_, extra, id) => {
+    const page = await renderPage({ report: () => ({ report: nothing, checkedAt: Date.now(), ...extra }) });
+
+    expect(await page.findByText("No updates found, but 1 plugin couldn't be checked.")).toBeTruthy();
+    expect(page.queryByText("Every plugin is up to date.")).toBeNull();
+    expect(page.getByText(id)).toBeTruthy();
+  });
+
+  it("doesn't say every plugin is up to date when the last check failed", async () => {
+    const page = await renderPage({
+      report: () => ({ report: nothing, checkedAt: Date.now(), lastFailure: { at: Date.now(), error: SSL } }),
+    });
+
+    expect(await page.findByRole("alert")).toBeTruthy();
+    expect(page.queryByText("Every plugin is up to date.")).toBeNull();
+  });
+
+  it("lists each plugin's failure in the notice when every check failed", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: emptyReport,
+        checkedAt: Date.now() - HOUR,
+        lastFailure: {
+          at: Date.now(),
+          error: "every plugin's update check failed",
+          failures: [
+            { id: "agent-board", error: SSL },
+            { id: "notes", error: "git ls-remote failed (exit 128): Operation timed out" },
+          ],
+        },
+      }),
+    });
+
+    const alert = await page.findByRole("alert");
+    expect(alert.textContent).toContain("every plugin's update check failed");
+    expect(alert.textContent).toContain(`agent-board: ${SSL}`);
+    expect(alert.textContent).toContain("notes: git ls-remote failed (exit 128): Operation timed out");
+    expect(alert.textContent).not.toContain("notesgit");
+    const items = Array.from(alert.querySelectorAll("li"), (li) => li.textContent);
+    expect(items).toEqual([`agent-board: ${SSL}`, "notes: git ls-remote failed (exit 128): Operation timed out"]);
+  });
+
+  it("marks an update carried from an earlier check with when it was last confirmed", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: {
+          ...emptyReport,
+          compatible: [{ ...emptyReport.compatible[0]!, stale: { confirmedAt: Date.now() - 3 * HOUR } }],
+          outOfRange: [
+            {
+              id: "agent-board",
+              from: "0.7.0",
+              to: "0.9.2",
+              version: "0.9.2",
+              newSource: "git:x",
+              compareUrl: "https://x",
+              stale: { confirmedAt: Date.now() - 2 * HOUR },
+            },
+          ],
+        },
+        checkedAt: Date.now(),
+        updateCheckFailures: [{ id: "homepage", error: SSL }],
+      }),
+    });
+
+    expect(await page.findByText("Stale: last confirmed 3h ago")).toBeTruthy();
+    expect(page.getByText("Stale: last confirmed 2h ago")).toBeTruthy();
+  });
+
+  it("keeps the stale note out of the row's truncated line, so it stays visible", async () => {
+    const page = await renderPage({
+      report: () => ({
+        report: {
+          ...emptyReport,
+          compatible: [
+            {
+              ...emptyReport.compatible[0]!,
+              from: "0.1.0-a-very-long-prerelease-tag",
+              to: "0.2.0-an-even-longer-prerelease-tag",
+              stale: { confirmedAt: Date.now() - 3 * HOUR },
+            },
+          ],
+          outOfRange: [
+            {
+              id: "agent-board",
+              from: "0.7.0",
+              to: "0.9.2",
+              version: "0.9.2",
+              newSource: "git:x",
+              compareUrl: "https://x",
+              stale: { confirmedAt: Date.now() - 2 * HOUR },
+            },
+          ],
+        },
+        checkedAt: Date.now(),
+      }),
+    });
+
+    const clipping = /(^|\s)(truncate|line-clamp-\d+|overflow-hidden|overflow-x-hidden|text-ellipsis|whitespace-nowrap)(\s|$)/;
+    for (const text of ["Stale: last confirmed 3h ago", "Stale: last confirmed 2h ago"]) {
+      const note = await page.findByText(text);
+      const row = note.closest("li")!;
+      expect(row).toBeTruthy();
+      // Every element from the note up to its row, none of which may clip it.
+      for (let el: Element | null = note; el !== null && el !== row.parentElement; el = el.parentElement) {
+        expect(el.className, `${text} inside <${el.tagName.toLowerCase()} class="${el.className}">`).not.toMatch(
+          el === row || el.tagName === "UL" ? /(^|\s)(truncate|line-clamp-\d+)(\s|$)/ : clipping,
+        );
+      }
+      // Not part of the truncated "from → to" line.
+      const truncated = row.querySelector(".truncate")!;
+      expect(truncated.textContent).toContain("→");
+      expect(truncated.contains(note)).toBe(false);
+    }
+  });
+
   it("shows no failure state after a good check", async () => {
     const page = await renderPage({
       report: () => ({ report: emptyReport, checkedAt: Date.now() }),

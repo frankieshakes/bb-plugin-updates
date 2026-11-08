@@ -41,12 +41,16 @@ export function Row({
   id,
   tag,
   children,
+  note,
   actions,
 }: {
   id: string;
   /** A short status shown beside the id, e.g. "Disabled". */
   tag?: string;
+  /** One truncated line of detail. */
   children?: ReactNode;
+  /** A line under the detail that must stay readable, so it wraps rather than truncates. */
+  note?: ReactNode;
   actions?: ReactNode;
 }) {
   return (
@@ -62,6 +66,9 @@ export function Row({
         </div>
         {children === undefined ? null : (
           <div className="truncate text-xs text-muted-foreground">{children}</div>
+        )}
+        {note === undefined ? null : (
+          <div className="break-words text-xs text-muted-foreground">{note}</div>
         )}
       </div>
       {actions === undefined ? null : <div className="flex shrink-0 items-center gap-1">{actions}</div>}

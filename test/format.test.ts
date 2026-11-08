@@ -46,3 +46,37 @@ describe("formatReport footer", () => {
     );
   });
 });
+
+describe("formatReport", () => {
+  it("marks a stale update with when it was last confirmed", () => {
+    const report = buildReport({
+      checks: [],
+      releases: {},
+      ignored: {},
+      seen: {},
+      unchecked: ["a"],
+      carried: [{ entry: update("a"), confirmedAt: 0 }],
+    });
+
+    expect(formatReport(report, 0)).toContain(
+      `Compatible updates:\n  a  a@v1 (aaa) → a@v2 (bbb)  (stale: last confirmed ${new Date(0).toLocaleString()})\n`,
+    );
+  });
+
+  it("lists each plugin's failure under a check that failed as a whole", () => {
+    const text = formatReport(buildReport({ checks: [], releases: {}, ignored: {}, seen: {} }), 0, {
+      lastFailure: {
+        at: 0,
+        error: "every plugin's update check failed",
+        failures: [
+          { id: "a", error: "git ls-remote failed (exit 128): x" },
+          { id: "b", error: "git ls-remote failed (exit 128): y" },
+        ],
+      },
+    });
+
+    expect(text).toMatch(
+      /Last check failed .+: every plugin's update check failed\. Showing results from .+\.\n  a  git ls-remote failed \(exit 128\): x\n  b  git ls-remote failed \(exit 128\): y$/,
+    );
+  });
+});

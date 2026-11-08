@@ -10,7 +10,7 @@ interface FakePlugin {
   enabled?: boolean;
   version: string;
   detail?: { range?: string; resolvedTag?: string; tagPrefix?: string; subdirectory?: string };
-  check: { outcome: string; candidate?: { version: string; display: string } };
+  check: { outcome: string; candidate?: { version: string; display: string }; detail?: string };
   settings?: {
     schema: Record<string, { type: string; label: string; secret?: true }>;
     values: Record<string, unknown>;
@@ -26,7 +26,8 @@ function fakeRegistry(
   initial: Record<string, FakePlugin>,
   failInstall: (source: string) => boolean = () => false,
 ) {
-  const installed = new Map(Object.entries(initial));
+  // Copies, so a test can change one without touching the shared fixtures.
+  const installed = new Map(Object.entries(initial).map(([id, p]) => [id, { ...p }]));
   const removed = new Map<string, FakePlugin>();
   const startedUpdates: string[] = [];
   const finishedUpdates = new Set<string>();
@@ -70,6 +71,10 @@ function fakeRegistry(
         checkCalls.push(args?.pluginId);
         const failure = checkFailure(args?.pluginId);
         if (failure !== undefined) throw failure;
+        // As bb answers for a plugin it doesn't have.
+        if (args?.pluginId !== undefined && !installed.has(args.pluginId)) {
+          throw new Error(`HTTP 422: unknown plugin "${args.pluginId}"`);
+        }
         return [...installed].filter(([id]) => args?.pluginId === undefined || id === args.pluginId).map(([id, p]) => ({
           id,
           installed: { version: p.version, display: display(p) },
@@ -77,7 +82,8 @@ function fakeRegistry(
         }));
       },
       getSource: async ({ pluginId }: { pluginId: string }) => {
-        const p = installed.get(pluginId)!;
+        const p = installed.get(pluginId);
+        if (p === undefined) throw new Error("HTTP 404: unknown plugin");
         return { requested: p.source, resolved: display(p), engines: {}, history: [], ...p.detail };
       },
       remove: async ({ pluginId }: { pluginId: string }) => {
@@ -1620,6 +1626,443 @@ describe("plugin-updates backend", () => {
           expect(listed.stdout).toContain("2 plugins with updates, plus 1 disabled.");
         });
       });
+    });
+  });
+
+  // bb 0.49.0 doesn't throw when one plugin's remote fails: its checkRows
+  // catches the error and returns that plugin as `unavailable`, the error
+  // message as `detail`. Shapes from an isolated bb 0.49.0 (logs 34, 41) and
+  // the user's host (git ls-remote "Operation timed out").
+  describe("per-plugin check errors bb returns as unavailable", () => {
+    type Stale = { stale?: { confirmedAt: number } };
+    type Snapshot = {
+      report: RpcReport & {
+        compatible: Array<{ id: string } & Stale>;
+        outOfRange: Array<{ id: string; to: string } & Stale>;
+        upToDate: Array<{ id: string }>;
+        other: Array<{ id: string; outcome: string; detail?: string }>;
+        releaseCheckFailures: Array<{ id: string; error: string }>;
+      };
+      checkedAt: number;
+      lastFailure?: { at: number; error: string; failures?: Array<{ id: string; error: string }> };
+      updateCheckFailures?: Array<{ id: string; error: string }>;
+    };
+    const timedOut = (repo: string) =>
+      `git ls-remote failed (exit 128): fatal: unable to access 'https://github.com/${repo}.git/': Failed to connect to github.com port 443 after 75002 ms: Operation timed out`;
+    const HOMEPAGE_DOWN = timedOut("y/bb-homepage");
+    const BOARD_DOWN = timedOut("a/bb-plugin-agent-board");
+    const errored = (detail: string) => ({ outcome: "unavailable", detail });
+    const notes: FakePlugin = {
+      source: "git:https://github.com/n/notes.git@semver:^1.0.0",
+      version: "1.0.0",
+      detail: { range: "^1.0.0", resolvedTag: "v1.0.0" },
+      check: { outcome: "current" },
+    };
+    const tasks: FakePlugin = { source: "builtin:tasks", version: "0.1.0", check: { outcome: "pinned" } };
+    /** Remotes in `down` fail our own ls-remote too, as the same outage would. */
+    const remotes = (down: string[] = []) =>
+      vi.mocked(listRemoteTags).mockImplementation(async (url) => {
+        if (down.some((d) => url.includes(d))) throw new Error(`fatal: unable to access '${url}/': Operation timed out`);
+        return url.includes("agent-board") ? agentBoardTags : "";
+      });
+    const ids = (items: Array<{ id: string }> = []) => items.map((i) => i.id).sort();
+
+    it("lists an errored plugin as one bb couldn't check, not under other", async () => {
+      remotes();
+      const registry = fakeRegistry({ homepage: { ...homepage, check: errored(HOMEPAGE_DOWN) }, notes });
+      const { rpc } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.updateCheckFailures).toEqual([{ id: "homepage", error: HOMEPAGE_DOWN }]);
+      expect(ids(snapshot.report.other)).toEqual([]);
+      expect(snapshot).not.toHaveProperty("lastFailure");
+    });
+
+    it("leaves plugins bb can't check by design under other", async () => {
+      remotes();
+      // Details bb 0.49.0 returns, rather than throws, for these.
+      const details = {
+        a: 'no tag of https://github.com/a/a.git matches ^0.7.0 (looking for tags named "vX.Y.Z")',
+        b: `security check failed: git tag "v0.7.0" in https://github.com/a/b.git moved from ${sha(1)} to ${sha(2)}; bb will not re-resolve a tag that changed. Remove the plugin and install it again to accept the new commit`,
+        c: "installed from the retired remote marketplace — remove it and reinstall from Plugins → Browse plugins to switch to the bundled copy",
+      };
+      const registry = fakeRegistry({
+        ...Object.fromEntries(Object.entries(details).map(([id, d]) => [id, { ...board(id), check: errored(d) }])),
+        notes,
+        tasks,
+      });
+      const { rpc } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot).not.toHaveProperty("updateCheckFailures");
+      expect(snapshot.report.other).toEqual([
+        ...Object.entries(details).map(([id, detail]) => ({
+          id,
+          installed: expect.any(String),
+          outcome: "unavailable",
+          detail,
+        })),
+        { id: "tasks", installed: expect.any(String), outcome: "pinned" },
+      ]);
+    });
+
+    it("carries the last good compatible and out-of-range results forward, stale, and counts them", async () => {
+      remotes();
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard, notes });
+      const { rpc } = await load(registry);
+      const good = await rpc<Snapshot>("check");
+      remotes(["bb-homepage", "agent-board"]);
+      registry.installed.get("homepage")!.check = errored(HOMEPAGE_DOWN);
+      registry.installed.get("agent-board")!.check = errored(BOARD_DOWN);
+
+      const failed = await rpc<Snapshot>("check");
+      const again = await rpc<Snapshot>("check");
+
+      for (const snapshot of [failed, again]) {
+        expect(snapshot.updateCheckFailures).toEqual([
+          { id: "homepage", error: HOMEPAGE_DOWN },
+          { id: "agent-board", error: BOARD_DOWN },
+        ]);
+        expect(snapshot.report.compatible).toMatchObject([
+          { id: "homepage", to: "bb-homepage@v0.2.7", stale: { confirmedAt: good.checkedAt } },
+        ]);
+        expect(snapshot.report.outOfRange).toMatchObject([
+          { id: "agent-board", to: "0.9.2", stale: { confirmedAt: good.checkedAt } },
+        ]);
+        expect(snapshot.report.badgeCount).toBe(2);
+        expect(ids(snapshot.report.releaseCheckFailures)).toEqual(["agent-board", "homepage"]);
+        expect(ids(snapshot.report.upToDate)).toEqual(["notes"]);
+        expect(ids(snapshot.report.other)).toEqual([]);
+        expect(snapshot).not.toHaveProperty("lastFailure");
+      }
+      expect(again.checkedAt).toBeGreaterThanOrEqual(good.checkedAt);
+    });
+
+    it("drops the stale marker once the plugin checks again", async () => {
+      remotes();
+      const registry = fakeRegistry({ homepage, notes });
+      const { rpc } = await load(registry);
+      await rpc("check");
+      registry.installed.get("homepage")!.check = errored(HOMEPAGE_DOWN);
+      await rpc("check");
+      registry.installed.get("homepage")!.check = homepage.check;
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.compatible).toEqual([
+        { id: "homepage", from: expect.any(String), to: "bb-homepage@v0.2.7", version: "dbcb6f5" },
+      ]);
+      expect(snapshot).not.toHaveProperty("updateCheckFailures");
+    });
+
+    it("stale results still follow ignored and disabled", async () => {
+      remotes();
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard, notes });
+      const { rpc } = await load(registry);
+      await rpc("check");
+      await rpc("ignore", { id: "homepage", version: "dbcb6f5" });
+      registry.installed.get("agent-board")!.enabled = false;
+      remotes(["bb-homepage", "agent-board"]);
+      registry.installed.get("homepage")!.check = errored(HOMEPAGE_DOWN);
+      registry.installed.get("agent-board")!.check = errored(BOARD_DOWN);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.ignored).toMatchObject([{ id: "homepage" }]);
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "agent-board", disabled: true, stale: {} }]);
+      expect(snapshot.report.badgeCount).toBe(0);
+    });
+
+    it("doesn't carry a result forward once the plugin's installed version changed", async () => {
+      remotes();
+      const registry = fakeRegistry({ homepage, "agent-board": agentBoard, notes });
+      const { rpc } = await load(registry);
+      await rpc("check");
+      remotes(["bb-homepage", "agent-board"]);
+      Object.assign(registry.installed.get("homepage")!, { version: "0.2.7", check: errored(HOMEPAGE_DOWN) });
+      Object.assign(registry.installed.get("agent-board")!, { version: "0.7.5", check: errored(BOARD_DOWN) });
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.compatible).toEqual([]);
+      expect(snapshot.report.outOfRange).toEqual([]);
+      expect(snapshot.report.badgeCount).toBe(0);
+    });
+
+    describe("when every plugin that can be checked errored", () => {
+      const allDown = (registry: ReturnType<typeof fakeRegistry>) => {
+        remotes(["bb-homepage", "agent-board"]);
+        registry.installed.get("homepage")!.check = errored(HOMEPAGE_DOWN);
+        registry.installed.get("agent-board")!.check = errored(BOARD_DOWN);
+      };
+      const failures = [
+        { id: "homepage", error: HOMEPAGE_DOWN },
+        { id: "agent-board", error: BOARD_DOWN },
+      ];
+
+      it("fails the check as a whole, keeping the last report and listing each failure", async () => {
+        remotes();
+        const registry = fakeRegistry({ homepage, "agent-board": agentBoard, tasks });
+        const { rpc, harness } = await load(registry);
+        const good = await rpc<Snapshot>("check");
+        allDown(registry);
+
+        await expect(rpc("check")).rejects.toThrow("every plugin's update check failed");
+
+        const after = await rpc<Snapshot>("report");
+        expect(after.checkedAt).toBe(good.checkedAt);
+        expect(after.report.badgeCount).toBe(2);
+        expect(after.report.outOfRange).toMatchObject([{ id: "agent-board" }]);
+        expect(after.lastFailure).toEqual({
+          at: expect.any(Number),
+          error: "every plugin's update check failed",
+          failures,
+        });
+        expect(
+          harness.inspection.realtimeSignals.filter((s) => s.channel === "report-changed").map((s) => s.payload),
+        ).toEqual([{ badgeCount: 2 }, { badgeCount: 2 }]);
+      });
+
+      it("bb plugin-updates check exits 1 and lists each failure", async () => {
+        remotes();
+        const registry = fakeRegistry({ homepage, "agent-board": agentBoard, tasks });
+        const { harness } = await load(registry);
+        await harness.behavior.runCli(["check"]);
+        allDown(registry);
+
+        const checked = await harness.behavior.runCli(["check"]);
+
+        expect(checked.exitCode).toBe(1);
+        expect(checked.stderr).toBe("Check failed: every plugin's update check failed");
+        expect(checked.stdout).toContain("Compatible updates:\n  homepage");
+        expect(checked.stdout).toMatch(
+          /\nLast check failed .+: every plugin's update check failed\. Showing results from .+\.\n/,
+        );
+        expect(checked.stdout).toContain(`  homepage  ${HOMEPAGE_DOWN}\n  agent-board  ${BOARD_DOWN}`);
+      });
+
+      it("fails before any check has worked, too", async () => {
+        const registry = fakeRegistry({ homepage, "agent-board": agentBoard, tasks });
+        allDown(registry);
+        const { harness, rpc } = await load(registry);
+
+        const checked = await harness.behavior.runCli(["check"]);
+
+        expect(checked).toMatchObject({ exitCode: 1, stderr: "Check failed: every plugin's update check failed" });
+        expect(await rpc("report")).toBeNull();
+      });
+    });
+  });
+
+  describe("plugins removed or failing mid-check", () => {
+    type Snapshot = {
+      report: RpcReport & { releaseCheckFailures: Array<{ id: string; error: string }> };
+      updateCheckFailures?: Array<{ id: string; error: string }>;
+      lastFailure?: unknown;
+    };
+    const mentions = (snapshot: Snapshot, id: string) => JSON.stringify(snapshot).includes(`"${id}"`);
+
+    it("a failing getSource fails only that plugin's release check", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      const registry = fakeRegistry({ a: board("a"), b: board("b") });
+      const getSource = registry.plugins.getSource;
+      registry.plugins.getSource = async (args) => {
+        if (args.pluginId === "b") throw new Error("HTTP 500: database is locked");
+        return getSource(args);
+      };
+      const { rpc } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "a", to: "0.9.2" }]);
+      expect(snapshot.report.releaseCheckFailures).toEqual([{ id: "b", error: "HTTP 500: database is locked" }]);
+    });
+
+    it("drops a plugin removed mid-check quietly, and saves the rest", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      const registry = fakeRegistry({ a: board("a"), fe: board("fe") });
+      // As in the isolated run: bb's bulk check throws once fe is gone, its own check and getSource 404.
+      const checkUpdates = registry.plugins.checkUpdates;
+      registry.plugins.checkUpdates = async (args) => {
+        if (args?.pluginId === undefined) {
+          await registry.plugins.remove({ pluginId: "fe" });
+          throw new Error('HTTP 422: plugin "fe" disappeared during update check');
+        }
+        return checkUpdates(args);
+      };
+      const { rpc } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "a" }]);
+      expect(mentions(snapshot, "fe")).toBe(false);
+      expect(snapshot).not.toHaveProperty("lastFailure");
+    });
+
+    it("drops a plugin removed between listing and getSource", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      const registry = fakeRegistry({ a: board("a"), fe: board("fe") });
+      const checkUpdates = registry.plugins.checkUpdates;
+      registry.plugins.checkUpdates = async (args) => {
+        const result = await checkUpdates(args);
+        await registry.plugins.remove({ pluginId: "fe" });
+        return result;
+      };
+      const { rpc } = await load(registry);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "a" }]);
+      expect(mentions(snapshot, "fe")).toBe(false);
+    });
+
+    it("a check while an out-of-range update reinstalls its plugin still works", async () => {
+      vi.mocked(listRemoteTags).mockResolvedValue(agentBoardTags);
+      const registry = fakeRegistry({ a: board("a"), b: board("b") });
+      const held = holdInstalls(registry);
+      // While racing: listed before b's remove, checked after it, as bb's bulk check then fails.
+      const { list, checkUpdates } = registry.plugins;
+      let racing = false;
+      let before: Awaited<ReturnType<typeof list>> | undefined;
+      registry.plugins.list = async () => {
+        const listed = racing ? before : undefined;
+        before = undefined;
+        return listed ?? list();
+      };
+      registry.plugins.checkUpdates = async (args) => {
+        if (racing && args?.pluginId === undefined) throw new Error('HTTP 422: plugin "b" disappeared during update check');
+        return checkUpdates(args);
+      };
+      const { rpc } = await load(registry);
+      await rpc("check");
+      const snapshotBefore = await list();
+      await rpc("update_out_of_range", { id: "b" });
+      await vi.waitFor(() => expect(held.sources).toHaveLength(1));
+      expect(registry.installed.has("b")).toBe(false);
+
+      racing = true;
+      before = snapshotBefore;
+      const snapshot = await rpc<Snapshot>("check");
+      racing = false;
+
+      expect(snapshot).not.toHaveProperty("lastFailure");
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "a" }]);
+      expect(mentions(snapshot, "b")).toBe(false);
+      await held.release();
+      await vi.waitFor(async () => expect((await queue(rpc))[0]?.state).toBe("done"));
+    });
+  });
+
+  describe("releases bb refused for their engines on apply", () => {
+    type Snapshot = {
+      report: RpcReport & { blocked: Array<{ id: string; version: string; reasons: string[] }> };
+    };
+    // What bb 0.49.0's install job fails with (isolated run, fixture fd).
+    const SDK = "requires bb plugin SDK >=99.0.0, running SDK is 0.6.132";
+    async function refuse(error = `install failed: ${SDK}`, bbVersion: { current: string } = { current: "0.49.0" }) {
+      vi.mocked(listRemoteTags).mockImplementation(async (url) => (url.includes("agent-board") ? agentBoardTags : ""));
+      const registry = fakeRegistry({ "agent-board": agentBoard, notes: board("notes") });
+      const install = registry.plugins.install;
+      registry.plugins.install = async (args) => {
+        if (args.source.endsWith("^0.9.2")) throw new Error(error);
+        return install(args);
+      };
+      const host = createFakePluginHost({
+        pluginId: "plugin-updates",
+        sdk: {
+          plugins: registry.plugins,
+          system: { version: async () => ({ ...(await runningBb(bbVersion.current).version()) }) },
+        },
+      });
+      await plugin(host.bb, { jobPollMs: 10, jobWaitTimeoutMs: 60_000 });
+      const rpc = async <T>(method: string, input: unknown = null) =>
+        (await host.harness.behavior.callRpc(method, input)) as T;
+      await rpc("check");
+      const result = await updateOutOfRange(rpc, "agent-board");
+      return { registry, rpc, result, harness: host.harness };
+    }
+
+    it("blocks the refused release from then on, with bb's reason, uncounted", async () => {
+      const { rpc, result } = await refuse();
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(result).toEqual({ kind: "rolled-back", error: `install failed: ${SDK}` });
+      expect(snapshot.report.outOfRange).toEqual([]);
+      expect(snapshot.report.blocked).toEqual([{ id: "agent-board", version: "0.9.2", reasons: [SDK] }]);
+      expect(snapshot.report.badgeCount).toBe(0);
+      expect((await rpc<Snapshot>("report")).report.blocked).toHaveLength(1);
+    });
+
+    it("also recognises bb's install-refused wording", async () => {
+      const { rpc } = await refuse(`install refused: plugin "agent-board" ${SDK}`);
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.blocked).toEqual([{ id: "agent-board", version: "0.9.2", reasons: [SDK] }]);
+    });
+
+    it("keeps offering a release whose install failed for another reason", async () => {
+      const { rpc } = await refuse('install failed: server bundle build for "agent-board" failed: Build failed with 1 error');
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.2" }]);
+      expect(snapshot.report.blocked).toEqual([]);
+    });
+
+    it("forgets the refusal when bb's version changes", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const bbVersion = { current: "0.49.0" };
+        const { rpc } = await refuse(undefined, bbVersion);
+        bbVersion.current = "0.50.0";
+        // Past the host version cache.
+        vi.setSystemTime(Date.now() + 120_000);
+
+        const snapshot = await rpc<Snapshot>("check");
+        // Forgotten, not just set aside: back on the old bb, it's offered too.
+        bbVersion.current = "0.49.0";
+        vi.setSystemTime(Date.now() + 120_000);
+        const back = await rpc<Snapshot>("check");
+
+        for (const { report } of [snapshot, back]) {
+          expect(report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.2" }]);
+          expect(report.blocked).toEqual([]);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("forgets the refusal when a newer release appears", async () => {
+      const { rpc } = await refuse();
+      vi.mocked(listRemoteTags).mockImplementation(async (url) =>
+        url.includes("agent-board") ? `${agentBoardTags}\n${sha(4)}\trefs/tags/v0.9.3` : "",
+      );
+
+      const snapshot = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.3" }]);
+      expect(snapshot.report.blocked).toEqual([]);
+      vi.mocked(listRemoteTags).mockImplementation(async (url) => (url.includes("agent-board") ? agentBoardTags : ""));
+      expect((await rpc<Snapshot>("check")).report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.2" }]);
+    });
+
+    it("forgets the refusal when the plugin's installed version changes", async () => {
+      const { rpc, registry } = await refuse();
+      registry.installed.get("agent-board")!.version = "0.7.5";
+
+      const snapshot = await rpc<Snapshot>("check");
+      registry.installed.get("agent-board")!.version = "0.7.0";
+      const back = await rpc<Snapshot>("check");
+
+      expect(snapshot.report.outOfRange).toMatchObject([{ id: "agent-board", from: "0.7.5", to: "0.9.2" }]);
+      expect(snapshot.report.blocked).toEqual([]);
+      // Forgotten, not just set aside: moved back, it's offered too.
+      expect(back.report.outOfRange).toMatchObject([{ id: "agent-board", from: "0.7.0", to: "0.9.2" }]);
     });
   });
 });
