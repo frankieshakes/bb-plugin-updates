@@ -220,7 +220,74 @@ describe("buildReport", () => {
     expect(report.releaseCheckFailures).toEqual([
       { id: "agent-board", error: "Authentication failed" },
     ]);
-    expect(report.upToDate.map(({ id }) => id)).toEqual(["agent-board"]);
+    expect(report.badgeCount).toBe(0);
+  });
+
+  it("lists a plugin whose release check failed under that failure only, not as idle", () => {
+    const report = buildReport({
+      checks: [
+        agentBoardCurrent,
+        { id: "pin", outcome: "pinned", installed: { version: "abc", label: "1.0.0", display: "pin@v1.0.0 (abc)" } },
+      ],
+      releases: {
+        "agent-board": { kind: "failed", error: "git ls-remote --tags https://x timed out after 15s" },
+        pin: { kind: "failed", error: "git ls-remote --tags https://y timed out after 15s" },
+      },
+      ignored: {},
+      seen: {},
+    });
+
+    expect(report.releaseCheckFailures.map(({ id }) => id)).toEqual(["agent-board", "pin"]);
+    expect(report.upToDate).toEqual([]);
+    expect(report.other).toEqual([]);
+  });
+
+  it("lists results carried from an earlier check as stale, and counts them", () => {
+    const report = buildReport({
+      checks: [],
+      releases: {
+        "agent-board": {
+          kind: "failed",
+          error: "Operation timed out",
+          carried: { release: agentBoardRelease, confirmedAt: 1000 },
+        },
+      },
+      ignored: {},
+      seen: { homepage: ["dbcb6f5"] },
+      unchecked: ["homepage", "agent-board"],
+      carried: [{ entry: homepageUpdate, confirmedAt: 2000 }],
+    });
+
+    expect(report.compatible).toEqual([
+      {
+        id: "homepage",
+        from: "bb-homepage.git@v0.2.5 (7caaae1)",
+        to: "bb-homepage.git@v0.2.7 (dbcb6f5)",
+        version: "dbcb6f5",
+        stale: { confirmedAt: 2000 },
+      },
+    ]);
+    expect(report.outOfRange).toMatchObject([{ id: "agent-board", to: "0.9.2", stale: { confirmedAt: 1000 } }]);
+    expect(report.releaseCheckFailures).toEqual([{ id: "agent-board", error: "Operation timed out" }]);
+    expect(report.badgeCount).toBe(2);
+    expect(report.newlySeen).toEqual([{ id: "agent-board", version: "0.9.2" }]);
+  });
+
+  it("files carried results under ignored and disabled like any other", () => {
+    const report = buildReport({
+      checks: [],
+      releases: {
+        "agent-board": { kind: "failed", error: "x", carried: { release: agentBoardRelease, confirmedAt: 1 } },
+      },
+      ignored: { homepage: ["dbcb6f5"] },
+      seen: {},
+      disabled: ["agent-board"],
+      unchecked: ["homepage", "agent-board"],
+      carried: [{ entry: homepageUpdate, confirmedAt: 1 }],
+    });
+
+    expect(report.ignored).toMatchObject([{ id: "homepage", kind: "compatible", stale: { confirmedAt: 1 } }]);
+    expect(report.outOfRange).toMatchObject([{ id: "agent-board", disabled: true }]);
     expect(report.badgeCount).toBe(0);
   });
 

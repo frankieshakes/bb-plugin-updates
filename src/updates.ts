@@ -1,19 +1,39 @@
 // The update service: runs checks, builds the report, tracks ignored and
 // announced versions, and starts updates. RPC and CLI both call into it.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import semver from "semver";
+import { engineRefusal, isCheckError } from "./bb-errors";
 import { DEFERRED_UPDATE, NEW_UPDATES, OUT_OF_RANGE_CHANGED, REPORT_CHANGED } from "./channels";
-import type { DeferredUpdate, ReportSnapshot, UpdateJob, UpdateRequest } from "./contract";
+import type { DeferredUpdate, OutOfRangeResult, ReportSnapshot, UpdateJob, UpdateRequest } from "./contract";
 import { cachedHostVersions, releaseProblems } from "./engines";
 import { listRemoteTags } from "./git";
 import { preflightOutOfRange, updateOutOfRange } from "./out-of-range";
 import { createOutOfRangeQueue } from "./out-of-range-queue";
 import { newerReleases, releaseCheckTarget, selectRunnableRelease } from "./releases";
-import { buildReport, type CheckEntry, type ReleaseResult, type Report } from "./report";
-import type { PluginCheckFailure, Store } from "./store";
+import {
+  buildReport,
+  type CarriedCheck,
+  type CarriedRelease,
+  type CheckEntry,
+  type OutOfRangeItem,
+  type ReleaseResult,
+  type Report,
+} from "./report";
+import type { LastCheck, PluginCheckFailure, Refusal, Store, StoredCheckFailure } from "./store";
 import { boundedMessage, message } from "./errors";
 
 /** How many per-plugin checks the fallback runs at once. */
 const FALLBACK_CONCURRENCY = 4;
+
+/** Every plugin that can be checked failed its check, so the check failed as a whole. */
+class EveryCheckFailed extends Error {
+  constructor(readonly failures: PluginCheckFailure[]) {
+    super("every plugin's update check failed");
+  }
+}
+
+/** Plugins bb fetches to check; builtin and local ones it doesn't, so they can't fail. */
+const isCheckable = (p: { source: string }) => p.source.startsWith("git:") || p.source.startsWith("npm:");
 
 export function createUpdateService(
   bb: BbPluginApi,
@@ -23,19 +43,23 @@ export function createUpdateService(
   const { plugins } = bb.sdk;
   const hostVersions = cachedHostVersions(bb);
 
-  async function checkRelease(id: string, version: string): Promise<ReleaseResult> {
-    const source = await plugins.getSource({ pluginId: id });
-    const target = releaseCheckTarget(source);
-    if (target.kind === "skip") return { kind: "none" };
+  /** `refused`: a release bb refused on apply, judged refused again without reading it. */
+  async function checkRelease(id: string, version: string, refused?: Refusal): Promise<ReleaseResult> {
     try {
+      // Inside the try: a plugin removed meanwhile 404s here (see check()).
+      const source = await plugins.getSource({ pluginId: id });
+      const target = releaseCheckTarget(source);
+      if (target.kind === "skip") return { kind: "none" };
       const lsRemote = await listRemoteTags(target.url);
       const releases = newerReleases({ source, installedVersion: version, lsRemote });
       if (releases.length === 0) return { kind: "none" };
       const host = await hostVersions();
       const { subdirectory } = source;
       // Skips releases this bb would refuse to install, as bb's own check does.
-      return await selectRunnableRelease(releases, ({ tag }) =>
-        releaseProblems({ url: target.url, tag, ...(subdirectory === undefined ? {} : { subdirectory }) }, host),
+      return await selectRunnableRelease(releases, async ({ tag, to }) =>
+        to === refused?.version
+          ? [refused.reason]
+          : releaseProblems({ url: target.url, tag, ...(subdirectory === undefined ? {} : { subdirectory }) }, host),
       );
     } catch (error) {
       return { kind: "failed", error: message(error) };
@@ -47,19 +71,21 @@ export function createUpdateService(
     if (last === null) return null;
     // Read live, so turning a plugin on or off shows without a re-check.
     const { plugins: installed } = await plugins.list();
+    const failures = last.updateCheckFailures ?? [];
     const report = buildReport({
       checks: last.checks,
       releases: last.releases,
       ignored: await store.ignored(),
       seen: await store.seen(),
       disabled: installed.filter((p) => p.enabled === false).map((p) => p.id),
-      unchecked: last.updateCheckFailures?.map(({ id }) => id),
+      unchecked: failures.map(({ id }) => id),
+      carried: failures.flatMap(({ carried }) => (carried === undefined ? [] : [carried])),
     });
     return {
       report,
       checkedAt: last.checkedAt,
       ...(lastFailure === null ? {} : { lastFailure }),
-      ...(last.updateCheckFailures?.length ? { updateCheckFailures: last.updateCheckFailures } : {}),
+      ...(failures.length === 0 ? {} : { updateCheckFailures: failures.map(({ id, error }) => ({ id, error })) }),
     };
   }
 
@@ -79,9 +105,9 @@ export function createUpdateService(
   }
 
   /**
-   * bb's update check fails as a whole when one plugin's remote does, so on
-   * failure check each plugin on its own, a few at a time. Throws the bulk
-   * error if none of those work either.
+   * bb's update check can fail as a whole (e.g. a plugin removed mid-check),
+   * so on failure check each plugin on its own, a few at a time. Throws the
+   * bulk error if none of those work either.
    */
   async function checkUpdates(ids: string[]) {
     let bulkError: unknown;
@@ -116,30 +142,105 @@ export function createUpdateService(
   /** Records the failure, so the page and CLI can say so; the last good check stays. */
   async function recordFailure(error: unknown) {
     try {
-      await store.saveLastFailure({ at: Date.now(), error: boundedMessage(error) });
+      await store.saveLastFailure({
+        at: Date.now(),
+        error: boundedMessage(error),
+        ...(error instanceof EveryCheckFailed ? { failures: error.failures } : {}),
+      });
       await publishReport();
     } catch (recordError) {
       bb.log.warn(`recording a failed check failed: ${message(recordError)}`);
     }
   }
 
+  /** The compatible update `last` found for `id`, if still for the version installed. */
+  function carriedCheck(last: LastCheck | null, id: string, installed?: string): CarriedCheck | undefined {
+    if (last === null) return undefined;
+    const found = last.checks.find((e) => e.id === id && e.outcome === "update-available");
+    const carried =
+      found === undefined
+        ? last.updateCheckFailures?.find((f) => f.id === id)?.carried
+        : { entry: found, confirmedAt: last.checkedAt };
+    // Without bb's entry for it this time, there's nothing to compare with.
+    return installed === undefined || carried?.entry.installed.version === installed ? carried : undefined;
+  }
+
+  /** The release outside the range `last` found for `id`, if still from `version`. */
+  function carriedRelease(last: LastCheck | null, id: string, version: string): CarriedRelease | undefined {
+    const found = last?.releases[id];
+    const carried =
+      found?.kind === "out-of-range"
+        ? { release: found, confirmedAt: last!.checkedAt }
+        : found?.kind === "failed"
+          ? found.carried
+          : undefined;
+    return carried?.release.from === version ? carried : undefined;
+  }
+
   async function check() {
     try {
-      const { plugins: installed } = await plugins.list();
-      const { checks, failures } = await checkUpdates(installed.map((p) => p.id));
+      const [{ plugins: listed }, last, refusals, host] = await Promise.all([
+        plugins.list(),
+        store.lastCheck(),
+        store.refusals(),
+        hostVersions(),
+      ]);
+      const result = await checkUpdates(listed.map((p) => p.id));
+      // bb returns a plugin whose check errored as `unavailable` (see isCheckError).
+      const checks = result.checks.filter((e) => !isCheckError(e));
+      const failures: StoredCheckFailure[] = [
+        ...result.failures,
+        ...result.checks.filter(isCheckError).map((e) => ({ id: e.id, error: boundedMessage(e.detail) })),
+      ].map((f) => {
+        const installed = result.checks.find((e) => e.id === f.id)?.installed.version;
+        const carried = carriedCheck(last, f.id, installed);
+        return carried === undefined ? f : { ...f, carried };
+      });
+      // A refusal holds while bb and the plugin stay on the versions it was refused on.
+      const refused = (p: { id: string; version: string }) => {
+        const r = refusals[p.id];
+        return r !== undefined && r.from === p.version && r.bbVersion === host.bb ? r : undefined;
+      };
       const releases: Record<string, ReleaseResult> = {};
       await Promise.all(
-        installed
+        listed
           .filter((p) => !p.source.startsWith("builtin:"))
           .map(async (p) => {
-            releases[p.id] = await checkRelease(p.id, p.version);
+            const release = await checkRelease(p.id, p.version, refused(p));
+            const carried = release.kind === "failed" ? carriedRelease(last, p.id, p.version) : undefined;
+            releases[p.id] = release.kind === "failed" && carried !== undefined ? { ...release, carried } : release;
           }),
       );
+      // A plugin removed meanwhile (an out-of-range update reinstalls one) has
+      // nothing to update, so it's left out rather than listed as failing.
+      let installed = listed;
+      try {
+        installed = (await plugins.list()).plugins;
+      } catch (error) {
+        bb.log.warn(`re-listing plugins after the check failed: ${message(error)}`);
+      }
+      const present = new Set(installed.map((p) => p.id));
+      const kept = failures.filter((f) => present.has(f.id));
+      const checkable = installed.filter(isCheckable);
+      if (checkable.length > 0 && checkable.every((p) => kept.some((f) => f.id === p.id))) {
+        throw new EveryCheckFailed(kept.map(({ id, error }) => ({ id, error })));
+      }
+      await forgetRefusals(refusals, (id, r) => {
+        const p = installed.find((i) => i.id === id);
+        const release = releases[id];
+        // Gone, moved, on another bb, refused release no longer newer, or a newer one runs.
+        return (
+          p === undefined ||
+          refused(p) !== r ||
+          release?.kind === "none" ||
+          (release?.kind === "out-of-range" && semver.valid(r.version) !== null && semver.gt(release.to, r.version))
+        );
+      });
       await store.saveLastCheck({
-        checks,
-        releases,
+        checks: checks.filter((e) => present.has(e.id)),
+        releases: Object.fromEntries(Object.entries(releases).filter(([id]) => present.has(id))),
         checkedAt: Date.now(),
-        ...(failures.length === 0 ? {} : { updateCheckFailures: failures }),
+        ...(kept.length === 0 ? {} : { updateCheckFailures: kept }),
       });
     } catch (error) {
       await recordFailure(error);
@@ -149,6 +250,38 @@ export function createUpdateService(
     const current = await publishReport();
     if (current !== null) await announce(current.report);
     return current;
+  }
+
+  /** Drops refusals `stale` picks, re-reading them so one saved meanwhile stays. */
+  async function forgetRefusals(seen: Record<string, Refusal>, stale: (id: string, r: Refusal) => boolean) {
+    const forget = Object.entries(seen).filter(([id, r]) => stale(id, r));
+    if (forget.length === 0) return;
+    const refusals = await store.refusals();
+    for (const [id, r] of forget) if (refusals[id]?.version === r.version) delete refusals[id];
+    await store.saveRefusals(refusals);
+  }
+
+  /**
+   * Remembers a release bb refused for its engines, so it's shown as blocked
+   * rather than offered again; check() forgets it once it may no longer hold.
+   */
+  async function rememberRefusal(item: OutOfRangeItem, result: OutOfRangeResult) {
+    if (result.kind !== "rolled-back") return;
+    const reason = engineRefusal(result.error);
+    if (reason === undefined) return;
+    try {
+      const [{ plugins: installed }, host, refusals] = await Promise.all([
+        plugins.list(),
+        hostVersions(),
+        store.refusals(),
+      ]);
+      const from = installed.find((p) => p.id === item.id)?.version;
+      if (from === undefined) return;
+      refusals[item.id] = { version: item.to, reason, from, ...(host.bb === undefined ? {} : { bbVersion: host.bb }) };
+      await store.saveRefusals(refusals);
+    } catch (error) {
+      bb.log.warn(`remembering bb's refusal of ${item.id} ${item.to} failed: ${message(error)}`);
+    }
   }
 
   async function setIgnored(id: string, version: string, ignore: boolean) {
@@ -278,7 +411,11 @@ export function createUpdateService(
     busy: hasActiveJob,
     pollMs: options.jobPollMs,
     waitTimeoutMs: options.jobWaitTimeoutMs,
-    apply: (item, onStart) => updateOutOfRange({ bb, item, onStart }),
+    apply: async (item, onStart) => {
+      const result = await updateOutOfRange({ bb, item, onStart });
+      await rememberRefusal(item, result);
+      return result;
+    },
     // Re-check whatever happened, so every list (and the badge) catches up.
     afterEach: () =>
       check().catch((error) => bb.log.warn(`check after out-of-range update failed: ${message(error)}`)),

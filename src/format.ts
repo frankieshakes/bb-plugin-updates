@@ -11,6 +11,10 @@ function section(title: string, lines: string[]): string[] {
 
 const at = (time: number) => new Date(time).toLocaleString();
 
+/** Found by an earlier check: this plugin's latest check failed. */
+const stale = (item: { stale?: { confirmedAt: number } }) =>
+  item.stale === undefined ? "" : `  (stale: last confirmed ${at(item.stale.confirmedAt)})`;
+
 export function formatReport(
   report: Report,
   checkedAt: number,
@@ -23,11 +27,11 @@ export function formatReport(
     ),
     ...section(
       "Compatible updates",
-      report.compatible.map((i) => `${name(i)}  ${i.from} → ${i.to}`),
+      report.compatible.map((i) => `${name(i)}  ${i.from} → ${i.to}${stale(i)}`),
     ),
     ...section(
       "Newer releases outside the installed range",
-      report.outOfRange.map((i) => `${name(i)}  ${i.from} → ${i.to}  ${i.compareUrl}`),
+      report.outOfRange.map((i) => `${name(i)}  ${i.from} → ${i.to}  ${i.compareUrl}${stale(i)}`),
     ),
     ...section(
       "Blocked by engine ranges",
@@ -46,6 +50,7 @@ export function formatReport(
   if (lastFailure !== undefined) {
     lines.push(
       `Last check failed ${at(lastFailure.at)}: ${lastFailure.error.replace(/\.$/, "")}. Showing results from ${at(checkedAt)}.`,
+      ...(lastFailure.failures ?? []).map((f) => `  ${f.id}  ${f.error}`),
     );
   }
   return lines.join("\n");

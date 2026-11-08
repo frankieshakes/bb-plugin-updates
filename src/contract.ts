@@ -57,8 +57,10 @@ export type DeferredUpdate = { id: string } & (
 
 /**
  * The last good check's report; null before the first one. `lastFailure`: a
- * later check failed, so the report is from `checkedAt`. `updateCheckFailures`:
- * plugins bb couldn't check in the last good check. Both absent when unset.
+ * later check failed, so the report is from `checkedAt` (`failures`: each
+ * plugin's error, when every plugin's own check failed). `updateCheckFailures`:
+ * plugins bb couldn't check in the last good check; their updates from an
+ * earlier check carry `stale`. All absent when unset.
  */
 export type ReportSnapshot = {
   report: Report;
