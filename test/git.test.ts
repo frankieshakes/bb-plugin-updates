@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { readPackageJsonAt } from "../src/git";
+import { listRemoteTags, readPackageJsonAt } from "../src/git";
 
 let root: string;
 let url: string;
@@ -64,5 +64,23 @@ describe("readPackageJsonAt", () => {
     await expect(readPackageJsonAt({ url, tag: "v9.9.9" })).rejects.toThrow();
     await expect(readPackageJsonAt({ url, tag: "v1.0.0", subdirectory: "nope" })).rejects.toThrow();
     expect(leftovers()).toEqual(before);
+  });
+});
+
+describe("git's own timeout", () => {
+  it("says the command timed out, and after how long", async () => {
+    // A stand-in git that hangs, as one stuck on an unreachable host does.
+    const bin = mkdtempSync(join(tmpdir(), "fake-git-"));
+    writeFileSync(join(bin, "git"), "#!/bin/sh\nexec sleep 5\n", { mode: 0o755 });
+    const PATH = process.env.PATH;
+    process.env.PATH = `${bin}:${PATH}`;
+    try {
+      await expect(listRemoteTags("https://example.invalid/a.git", { timeoutMs: 200 })).rejects.toThrow(
+        /^git ls-remote --tags https:\/\/example\.invalid\/a\.git timed out after 0\.2s$/,
+      );
+    } finally {
+      process.env.PATH = PATH;
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 });
